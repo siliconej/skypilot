@@ -1,5 +1,7 @@
 """Cloud-neutral VM provision utils."""
 import collections
+from concurrent import futures
+import contextvars
 import dataclasses
 import json
 import os
@@ -8,7 +10,7 @@ import socket
 import subprocess
 import time
 import traceback
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, TypeVar
 
 import colorama
 
@@ -46,10 +48,42 @@ from sky.utils import ux_utils
 # which will be customized in sky.provision.logging.
 logger = sky_logging.init_logger('sky.provisioner')
 
+T = TypeVar('T')
+
 # The maximum number of retries for waiting for instances to be ready and
 # teardown instances when provisioning fails.
 _MAX_RETRY = 3
 _TITLE = '\n\n' + '=' * 20 + ' {} ' + '=' * 20 + '\n'
+
+# How long to wait for the Ray cluster that K8s pods start on their own to
+# have every node joined, before starting Ray from here instead.
+_K8S_RAY_READY_TIMEOUT_SECONDS = 90
+# Extra time the remote call for that wait gets beyond the wait itself, to
+# cover the transport and the interpreter start on the head.
+_RAY_WAIT_CALL_SLACK_SECONDS = 30
+
+
+def _run_alongside(main: Callable[[], T], background: Callable[[], None]) -> T:
+    """Runs `main` while `background` runs in another thread.
+
+    Returns `main`'s result once both are done, and raises `background`'s
+    error, if any, after `main` returns. The thread gets this thread's
+    provision log path (a thread-local) and context variables, so its logs
+    and request context are the ones of this provision.
+    """
+    log_path = provision_logging.config.log_path
+    ctx = contextvars.copy_context()
+
+    def run_background() -> None:
+        provision_logging.config.log_path = log_path
+        background()
+
+    with futures.ThreadPoolExecutor(max_workers=1) as executor:
+        background_future = executor.submit(ctx.run, run_background)
+        result = main()
+        background_future.result()
+    return result
+
 
 # Hooks that report where a provider actually placed a cluster's instances,
 # when that can differ from the region the launch was submitted to.
@@ -787,17 +821,11 @@ def _post_provision_setup(
             return match is not None and int(
                 match.group(1)) == expected_num_nodes
 
-        def check_ray_port_and_cluster_healthy() -> Tuple[int, bool, bool]:
-            head_ray_needs_restart = True
-            ray_cluster_healthy = False
+        def parse_ray_probe(returncode: int,
+                            stdout: str) -> Tuple[int, bool, bool]:
+            """Reads (ray_port, ray_cluster_healthy, head_ray_needs_restart)
+            from the output of a Ray probe on the head."""
             ray_port = constants.SKY_REMOTE_RAY_PORT
-
-            # Check if head node Ray is alive
-            returncode, stdout, _ = head_runner.run(
-                instance_setup.RAY_ALIVE_NODE_COUNT_COMMAND,
-                stream_logs=False,
-                require_outputs=True,
-                separate_stderr=True)
             # The port is printed before the GCS is asked, so a probe that
             # fails because Ray is still coming up still names the port.
             found, payload = message_utils.decode_payload(
@@ -815,10 +843,53 @@ def _post_provision_setup(
                                        stdout, cluster_info.num_instances))
             return ray_port, ray_cluster_healthy, head_ray_needs_restart
 
+        def check_ray_port_and_cluster_healthy() -> Tuple[int, bool, bool]:
+            # Check if head node Ray is alive
+            returncode, stdout, _ = head_runner.run(
+                instance_setup.RAY_ALIVE_NODE_COUNT_COMMAND,
+                stream_logs=False,
+                require_outputs=True,
+                separate_stderr=True)
+            return parse_ray_probe(returncode, stdout)
+
+        def wait_for_ray_cluster_healthy(
+                timeout: float) -> Tuple[int, bool, bool]:
+            """Blocks until every node has joined Ray, or until `timeout`.
+
+            The wait runs on the head as one remote call, so readiness is
+            seen within a poll interval rather than a whole probe round
+            trip. A call that drops before the wait finishes (no done
+            marker) is retried for the time left, so a flaky `kubectl exec`
+            does not fall through to restarting Ray on every node.
+            """
+            deadline = time.time() + timeout
+            while True:
+                remaining = max(deadline - time.time(), 0.0)
+                returncode, stdout, stderr = head_runner.run(
+                    instance_setup.ray_wait_for_alive_nodes_command(
+                        cluster_info.num_instances, remaining),
+                    stream_logs=False,
+                    require_outputs=True,
+                    separate_stderr=True,
+                    timeout=int(remaining) + _RAY_WAIT_CALL_SLACK_SECONDS)
+                if (instance_setup.RAY_WAIT_DONE_MARKER in stdout or
+                        time.time() >= deadline):
+                    break
+                logger.debug('Ray wait on the head ended early (exit code '
+                             f'{returncode}); retrying. stderr: {stderr}')
+                time.sleep(1)
+            return parse_ray_probe(returncode, stdout)
+
         status.update(
             runtime_preparation_str.format(step=3, step_name='runtime'))
 
+        def start_skylet() -> None:
+            instance_setup.start_skylet_on_head_node(cluster_name, cluster_info,
+                                                     ssh_credentials,
+                                                     launched_resources)
+
         skip_ray_setup = False
+        skylet_started = False
         ray_port = constants.SKY_REMOTE_RAY_PORT
         head_ray_needs_restart = True
         ray_cluster_healthy = False
@@ -832,24 +903,19 @@ def _post_provision_setup(
             (ray_port, ray_cluster_healthy,
              head_ray_needs_restart) = check_ray_port_and_cluster_healthy()
         elif cloud_name.lower() in provision_constants.K8S_BASED_CLOUDS:
-            timeout = 90  # 1.5-min maximum timeout
-            start = time.time()
-            while True:
-                # Wait until Ray cluster is ready
-                (ray_port, ray_cluster_healthy,
-                 head_ray_needs_restart) = check_ray_port_and_cluster_healthy()
-                if ray_cluster_healthy:
-                    logger.debug('Ray cluster is ready. Skip head and worker '
-                                 'node ray cluster setup.')
-                    break
-                if time.time() - start > timeout:
-                    # In most cases, the ray cluster will be ready after a few
-                    # seconds. Trigger ray start on head or worker nodes to be
-                    # safe, if the ray cluster is not ready after timeout.
-                    break
-                logger.debug('Ray cluster is not ready yet, waiting for the '
-                             'async setup to complete...')
-                time.sleep(1)
+            # The pods start Ray on their own (kubernetes-ray.yml.j2), so
+            # wait for every node to join. In most cases that takes a few
+            # seconds; past the timeout, Ray is started below to be safe.
+            # The skylet needs only the head and the runtime installed
+            # above, not the workers, so it starts while the wait runs.
+            (ray_port, ray_cluster_healthy,
+             head_ray_needs_restart) = _run_alongside(
+                 lambda: wait_for_ray_cluster_healthy(
+                     _K8S_RAY_READY_TIMEOUT_SECONDS), start_skylet)
+            skylet_started = True
+            if ray_cluster_healthy:
+                logger.debug('Ray cluster is ready. Skip head and worker '
+                             'node ray cluster setup.')
 
         if skip_ray_setup:
             logger.debug('Skip Ray cluster setup on the head node.')
@@ -910,9 +976,8 @@ def _post_provision_setup(
                                                     cluster_info,
                                                     ssh_credentials)
 
-        instance_setup.start_skylet_on_head_node(cluster_name, cluster_info,
-                                                 ssh_credentials,
-                                                 launched_resources)
+        if not skylet_started:
+            start_skylet()
 
     logger.info(
         ux_utils.finishing_message(f'Cluster launched: {cluster_name}.',
