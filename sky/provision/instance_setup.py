@@ -366,6 +366,96 @@ RAY_ALIVE_NODE_COUNT_COMMAND = (
 RAY_ALIVE_NODES_PATTERN = re.compile(r'^SKY_ALIVE_NODES (\d+) (\d+)$',
                                      re.MULTILINE)
 
+# Last line of ray_wait_for_alive_nodes_command's output. Its absence means
+# the transport (e.g. `kubectl exec`) dropped before the wait finished, not
+# that Ray is down.
+RAY_WAIT_DONE_MARKER = 'SKY_RAY_WAIT_DONE'
+# How often the head re-checks the GCS while waiting. Cheap: it reuses one
+# interpreter and one GcsClient.
+_RAY_WAIT_POLL_INTERVAL_SECONDS = 0.2
+# Blocks on the head until exactly `expected` nodes are alive in the GCS, or
+# until the deadline, then reports like RAY_ALIVE_NODE_COUNT_COMMAND: the port
+# payload, a SKY_ALIVE_NODES line when the GCS answered, and exit 0 iff it
+# answered. Polling RAY_ALIVE_NODE_COUNT_COMMAND instead costs a `kubectl exec`
+# and three interpreter starts per check (2-4s each on K8s), so readiness was
+# noticed up to a whole check late. Stdlib and ray only, no `sky`: the K8s
+# bootstrap may be reinstalling skypilot while this runs. The port file is
+# re-read every round, as the head writes it only once `ray start` returns.
+# Arguments: expected, timeout, interval, runtime dir env var, port file,
+# default port.
+_WAIT_ALIVE_NODES_PY = """\
+import json, os, socket, sys, time
+expected, timeout, interval = (int(sys.argv[1]), float(sys.argv[2]),
+                               float(sys.argv[3]))
+runtime_dir_env, port_file, default_port = (sys.argv[4], sys.argv[5],
+                                            int(sys.argv[6]))
+runtime_dir = os.path.expanduser(os.environ.get(runtime_dir_env, '~'))
+
+
+def read_port():
+    try:
+        with open(os.path.join(runtime_dir, port_file)) as f:
+            return int(json.load(f)['ray_port'])
+    except Exception:
+        return default_port
+
+
+deadline = time.monotonic() + timeout
+client, client_port = None, None
+while True:
+    port = read_port()
+    counts = None
+    s = socket.socket()
+    s.settimeout(5)
+    up = s.connect_ex(('127.0.0.1', port)) == 0
+    s.close()
+    if up:
+        try:
+            if client is None or client_port != port:
+                from ray._raylet import GcsClient
+                client = GcsClient(address='127.0.0.1:%d' % port)
+                client_port = port
+            nodes = client.get_all_node_info(timeout=10).values()
+            states = [n['state'] if isinstance(n, dict) else n.state
+                      for n in nodes]
+            counts = (states.count(0), len(states))
+        except Exception as e:
+            client = None
+            print('Ray GCS not ready:', e, file=sys.stderr)
+    if counts is not None and counts[0] == expected:
+        break
+    if time.monotonic() + interval >= deadline:
+        break
+    time.sleep(interval)
+
+print('<sky-payload>%s</sky-payload>' % json.dumps({'ray_port': port}))
+if counts is not None:
+    print('SKY_ALIVE_NODES %d %d' % counts)
+elif not up:
+    print('Ray cluster is not found at 127.0.0.1:%d' % port)
+print('SKY_RAY_WAIT_DONE', flush=True)
+sys.exit(0 if counts is not None else 1)
+"""
+
+
+def ray_wait_for_alive_nodes_command(expected_num_nodes: int,
+                                     timeout: float) -> str:
+    """Returns a command that waits on the head for all nodes to join Ray.
+
+    See _WAIT_ALIVE_NODES_PY. The script is shipped base64-encoded so that
+    it survives every runner's quoting as a single shell word.
+    """
+    script_b64 = base64.b64encode(
+        _WAIT_ALIVE_NODES_PY.encode('utf-8')).decode('ascii')
+    return (f'{constants.SKY_PYTHON_CMD} -c "import base64; '
+            f'exec(base64.b64decode(\'{script_b64}\'))" '
+            f'{expected_num_nodes} {timeout:.1f} '
+            f'{_RAY_WAIT_POLL_INTERVAL_SECONDS} '
+            f'{constants.SKY_RUNTIME_DIR_ENV_VAR_KEY} '
+            f'{shlex.quote(constants.SKY_REMOTE_RAY_PORT_FILE)} '
+            f'{constants.SKY_REMOTE_RAY_PORT}')
+
+
 # Command that waits for the ray status to be initialized. Otherwise, a later
 # `sky status -r` may fail due to the ray cluster not being ready.
 # Reads SKYPILOT_RAY_PORT (exported by the hostNetwork probe) rather than
