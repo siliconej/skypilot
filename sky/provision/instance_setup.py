@@ -520,7 +520,11 @@ def _auto_retry(should_retry: Callable[[Exception], bool] = lambda _: True):
                 try:
                     return func(*args, **kwargs)
                 except Exception as e:  # pylint: disable=broad-except
-                    if not should_retry(e) or retry_cnt >= _MAX_RETRY - 1:
+                    # A pod that is gone stays gone: every retry would fail
+                    # the same way, only later.
+                    if (not should_retry(e) or
+                            command_runner.is_exec_target_gone(str(e)) or
+                            retry_cnt >= _MAX_RETRY - 1):
                         raise
                     sleep = backoff.current_backoff()
                     logger.info(

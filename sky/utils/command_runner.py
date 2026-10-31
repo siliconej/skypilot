@@ -133,6 +133,24 @@ _SSH_AUTH_FAILURE_PATTERNS = [
     'Authentication failed',
 ]
 
+# kubectl exec errors (lowercased) meaning the target pod will never run the
+# command: it was deleted, or it already finished. Unlike a dropped connection,
+# retrying these cannot succeed. Narrower than
+# KubernetesCommandRunner._POD_GONE_EXEC_SIGNATURES, which also matches errors
+# that can be transient and only decides whether to look up a reason.
+_EXEC_TARGET_GONE_SIGNATURES = (
+    'error from server (notfound): pods',
+    'cannot exec into a container in a completed pod',
+    'current phase is failed',
+    'current phase is succeeded',
+)
+
+
+def is_exec_target_gone(text: str) -> bool:
+    """Whether `text` (e.g. a failed command's stderr) says its pod is gone."""
+    lowered = text.lower()
+    return any(sig in lowered for sig in _EXEC_TARGET_GONE_SIGNATURES)
+
 
 def wrap_command_as_user(argv: List[str],
                          user: str,
