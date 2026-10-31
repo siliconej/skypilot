@@ -795,17 +795,117 @@ async def get_job_status(
         _log(f'Cluster {cluster_name} not found.')
         return None, None
     assert isinstance(handle, backends.CloudVmRayResourceHandle), handle
+    cluster_handle: 'backends.CloudVmRayResourceHandle' = handle
     job_ids = None if job_id is None else [job_id]
+
+    def _fetch() -> Tuple[Optional['job_lib.JobStatus'], Optional[float]]:
+        statuses = backend.get_job_status(cluster_handle,
+                                          job_ids=job_ids,
+                                          stream_logs=False)
+        return list(statuses.values())[0], None
+
+    status, _, transient_error_reason = await _fetch_job_status_on_head(
+        _fetch, _log_job_status)
+    return status, transient_error_reason
+
+
+async def get_job_status_and_submitted_at(
+    backend: 'backends.CloudVmRayBackend',
+    cluster_name: str,
+    job_id: Optional[int],
+    *,
+    handle: Optional['backends.CloudVmRayResourceHandle'] = None,
+) -> Tuple[Optional['job_lib.JobStatus'], Optional[float], Optional[str]]:
+    """get_job_status(runtime_checked=True), plus when the job was submitted.
+
+    After a launch, the controller needs both to know the job started on the
+    cluster. Without gRPC each is a command on the head node (a kubectl exec
+    or an SSH round trip of a second or more), so this asks for both at once.
+
+    Returns:
+        job_status: The status of the job, as get_job_status returns it.
+        submitted_at: When the job was submitted on the cluster, or None if
+            this call did not fetch it (gRPC, where the separate call is
+            cheap) or the job does not exist. Callers fall back to
+            get_job_timestamp.
+        transient_error_reason: As get_job_status returns it.
+    """
+    if handle is None:
+        handle = await asyncio.to_thread(
+            global_user_state.get_handle_from_cluster_name, cluster_name)
+    if handle is None:
+        # See get_job_status.
+        logger.info(f'Cluster {cluster_name} not found.')
+        return None, None, None
+    assert isinstance(handle, backends.CloudVmRayResourceHandle), handle
+    cluster_handle: 'backends.CloudVmRayResourceHandle' = handle
+
+    def _log_job_status(status: Optional['job_lib.JobStatus']) -> None:
+        logger.info(
+            'No job found.' if status is None else f'Job status: {status}')
+
+    return await _fetch_job_status_on_head(
+        lambda: _job_status_and_submitted_at_on_head(backend, cluster_handle,
+                                                     job_id), _log_job_status)
+
+
+def _job_status_and_submitted_at_on_head(
+    backend: 'backends.CloudVmRayBackend',
+    handle: 'backends.CloudVmRayResourceHandle',
+    job_id: Optional[int],
+) -> Tuple[Optional['job_lib.JobStatus'], Optional[float]]:
+    """Fetches a job's status and submitted-at time, in one head command."""
+    if handle.is_grpc_enabled_with_flag:
+        # Each gRPC call is cheap, and get_job_status falls back to the head
+        # command by itself if the skylet does not answer.
+        job_ids = None if job_id is None else [job_id]
+        statuses = backend.get_job_status(handle,
+                                          job_ids=job_ids,
+                                          stream_logs=False)
+        return list(statuses.values())[0], None
+    code = job_lib.JobLibCodeGen.get_job_status_and_submitted_timestamp(job_id)
+    returncode, stdout, stderr = backend.run_on_head(handle,
+                                                     code,
+                                                     stream_logs=False,
+                                                     require_outputs=True,
+                                                     separate_stderr=True)
+    subprocess_utils.handle_returncode(returncode, code,
+                                       'Failed to get job status.', stderr)
+    payloads = [
+        line for line in stdout.splitlines()
+        if message_utils.decode_payload(line, raise_for_mismatch=False)[0]
+    ]
+    if not payloads:
+        # As in CloudVmRayBackend.get_job_status: a returncode of 0 with no
+        # output has been seen from misbehaving clusters.
+        raise exceptions.CommandFailureException(
+            command=code,
+            failure='produced no output',
+            error_msg='Failed to get job status.',
+            detailed_reason=f'stderr="{stderr}"',
+        )
+    status = list(job_lib.load_statuses_payload(payloads[0]).values())[0]
+    submitted_at = (message_utils.decode_payload(payloads[1])
+                    if len(payloads) > 1 else None)
+    return status, submitted_at
+
+
+async def _fetch_job_status_on_head(
+    fetch: Callable[[], Tuple[Optional['job_lib.JobStatus'], Optional[float]]],
+    log_job_status: Callable[[Optional['job_lib.JobStatus']], None],
+) -> Tuple[Optional['job_lib.JobStatus'], Optional[float], Optional[str]]:
+    """Runs fetch, telling transient errors apart from fatal ones.
+
+    Returns:
+        (job_status, submitted_at, transient_error_reason), where the first
+        two are what fetch returned, and all but the reason are None after a
+        transient error.
+    """
     try:
-        statuses = await asyncio.wait_for(
-            asyncio.to_thread(backend.get_job_status,
-                              handle,
-                              job_ids=job_ids,
-                              stream_logs=False),
-            timeout=_JOB_STATUS_FETCH_TIMEOUT_SECONDS)
-        status = list(statuses.values())[0]
-        _log_job_status(status)
-        return status, None
+        status, submitted_at = await asyncio.wait_for(
+            asyncio.to_thread(fetch), timeout=_JOB_STATUS_FETCH_TIMEOUT_SECONDS)
+        log_job_status(status)
+        return status, submitted_at, None
     except (exceptions.CommandError, exceptions.CommandFailureException,
             grpc.RpcError, grpc.FutureTimeoutError, ValueError, TypeError,
             asyncio.TimeoutError) as e:
@@ -855,7 +955,7 @@ async def get_job_status(
                                                     'already cleaned up')
             else:
                 raise
-        return None, potential_transient_error_reason
+        return None, None, potential_transient_error_reason
 
 
 def controller_process_alive(record: managed_job_state.ControllerPidRecord,

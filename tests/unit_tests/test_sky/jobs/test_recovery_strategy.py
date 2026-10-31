@@ -1074,21 +1074,21 @@ def _break_job_status(monkeypatch):
     async def boom(*args, **kwargs):
         raise ValueError('Unable to start local API server')
 
-    monkeypatch.setattr(recovery_strategy.managed_job_utils, 'get_job_status',
-                        boom)
+    monkeypatch.setattr(recovery_strategy.managed_job_utils,
+                        'get_job_status_and_submitted_at', boom)
 
 
 def _break_job_timestamp(monkeypatch):
     """Get past the status check so the timestamp fetch is reached."""
 
     async def running(*args, **kwargs):
-        return recovery_strategy.job_lib.JobStatus.RUNNING, None
+        return recovery_strategy.job_lib.JobStatus.RUNNING, None, None
 
     def boom(*args, **kwargs):
         raise ValueError('Unable to start local API server')
 
-    monkeypatch.setattr(recovery_strategy.managed_job_utils, 'get_job_status',
-                        running)
+    monkeypatch.setattr(recovery_strategy.managed_job_utils,
+                        'get_job_status_and_submitted_at', running)
     monkeypatch.setattr(recovery_strategy.managed_job_runtime, 'is_registered',
                         lambda: False)
     monkeypatch.setattr(recovery_strategy.managed_job_utils,
@@ -1116,14 +1116,14 @@ async def test_submit_wait_attributes_a_swallowed_exception(
 
 @pytest.mark.asyncio
 async def test_submit_wait_attributes_a_transient_status(monkeypatch):
-    """get_job_status can report a transient reason without raising."""
+    """The status fetch can report a transient reason without raising."""
     executor = _make_submit_wait_executor(monkeypatch)
 
     async def transient(*args, **kwargs):
-        return None, 'pod not found'
+        return None, None, 'pod not found'
 
-    monkeypatch.setattr(recovery_strategy.managed_job_utils, 'get_job_status',
-                        transient)
+    monkeypatch.setattr(recovery_strategy.managed_job_utils,
+                        'get_job_status_and_submitted_at', transient)
 
     assert await executor._wait_until_job_starts_on_cluster() == (
         None, '_status_transient')
@@ -1135,10 +1135,10 @@ async def test_submit_wait_falls_back_to_checks_exhausted(monkeypatch):
     executor = _make_submit_wait_executor(monkeypatch)
 
     async def still_init(*args, **kwargs):
-        return recovery_strategy.job_lib.JobStatus.INIT, None
+        return recovery_strategy.job_lib.JobStatus.INIT, None, None
 
-    monkeypatch.setattr(recovery_strategy.managed_job_utils, 'get_job_status',
-                        still_init)
+    monkeypatch.setattr(recovery_strategy.managed_job_utils,
+                        'get_job_status_and_submitted_at', still_init)
 
     assert await executor._wait_until_job_starts_on_cluster() == (
         None, '_checks_exhausted')
@@ -1159,10 +1159,10 @@ async def test_submit_wait_clears_a_stale_anomaly(monkeypatch):
         calls['n'] += 1
         if calls['n'] == 1:
             raise ValueError('a blip on the first poll')
-        return recovery_strategy.job_lib.JobStatus.INIT, None
+        return recovery_strategy.job_lib.JobStatus.INIT, None, None
 
-    monkeypatch.setattr(recovery_strategy.managed_job_utils, 'get_job_status',
-                        flaky_then_init)
+    monkeypatch.setattr(recovery_strategy.managed_job_utils,
+                        'get_job_status_and_submitted_at', flaky_then_init)
     monkeypatch.setattr(recovery_strategy, 'MAX_JOB_CHECKING_RETRY', 3)
 
     assert await executor._wait_until_job_starts_on_cluster() == (
@@ -1186,10 +1186,10 @@ async def test_submit_wait_returns_the_timestamp_unattributed(
     executor = _make_submit_wait_executor(monkeypatch)
 
     async def running(*args, **kwargs):
-        return recovery_strategy.job_lib.JobStatus.RUNNING, None
+        return recovery_strategy.job_lib.JobStatus.RUNNING, None, None
 
-    monkeypatch.setattr(recovery_strategy.managed_job_utils, 'get_job_status',
-                        running)
+    monkeypatch.setattr(recovery_strategy.managed_job_utils,
+                        'get_job_status_and_submitted_at', running)
     monkeypatch.setattr(recovery_strategy.managed_job_runtime, 'is_registered',
                         lambda: registered)
     monkeypatch.setattr(recovery_strategy.global_user_state,
@@ -1201,6 +1201,76 @@ async def test_submit_wait_returns_the_timestamp_unattributed(
 
     assert await executor._wait_until_job_starts_on_cluster() == (expected,
                                                                   None)
+
+
+def _status_fetch_returns(monkeypatch, status, submitted_at):
+
+    async def fetch(*args, **kwargs):
+        return status, submitted_at, None
+
+    monkeypatch.setattr(recovery_strategy.managed_job_utils,
+                        'get_job_status_and_submitted_at', fetch)
+    monkeypatch.setattr(recovery_strategy.managed_job_runtime, 'is_registered',
+                        lambda: False)
+
+
+@pytest.mark.asyncio
+async def test_submit_wait_uses_the_timestamp_fetched_with_the_status(
+        monkeypatch):
+    """No second command on the head when the status came with it."""
+    executor = _make_submit_wait_executor(monkeypatch)
+    _status_fetch_returns(monkeypatch,
+                          recovery_strategy.job_lib.JobStatus.RUNNING, 33.0)
+    get_job_timestamp = mock.MagicMock(return_value=22.0)
+    monkeypatch.setattr(recovery_strategy.managed_job_utils,
+                        'get_job_timestamp', get_job_timestamp)
+
+    assert await executor._wait_until_job_starts_on_cluster() == (33.0, None)
+    get_job_timestamp.assert_not_called()
+
+
+@pytest.mark.parametrize('status', [
+    recovery_strategy.job_lib.JobStatus.RUNNING,
+    recovery_strategy.job_lib.JobStatus.SUCCEEDED,
+    recovery_strategy.job_lib.JobStatus.FAILED,
+])
+@pytest.mark.asyncio
+async def test_submit_wait_remembers_the_status_it_saw_once(
+        monkeypatch, status):
+    """The monitor loop gets the status the launch saw, and only once."""
+    executor = _make_submit_wait_executor(monkeypatch)
+    _status_fetch_returns(monkeypatch, status, 33.0)
+
+    await executor._wait_until_job_starts_on_cluster()
+
+    assert executor.pop_job_status_seen_at_launch() == status
+    assert executor.pop_job_status_seen_at_launch() is None
+
+
+@pytest.mark.asyncio
+async def test_submit_wait_that_fails_remembers_no_status(monkeypatch):
+    """A status from a wait that gave up must not reach the monitor loop."""
+    executor = _make_submit_wait_executor(monkeypatch)
+    _break_job_timestamp(monkeypatch)
+
+    assert await executor._wait_until_job_starts_on_cluster() == (None,
+                                                                  ':ValueError')
+    assert executor.pop_job_status_seen_at_launch() is None
+
+
+@pytest.mark.asyncio
+async def test_submit_wait_forgets_the_status_of_an_earlier_launch(monkeypatch):
+    """A recovery's wait must not hand over the previous launch's status."""
+    executor = _make_submit_wait_executor(monkeypatch)
+    _status_fetch_returns(monkeypatch,
+                          recovery_strategy.job_lib.JobStatus.SUCCEEDED, 33.0)
+    await executor._wait_until_job_starts_on_cluster()
+    _status_fetch_returns(monkeypatch, recovery_strategy.job_lib.JobStatus.INIT,
+                          None)
+
+    assert await executor._wait_until_job_starts_on_cluster() == (
+        None, '_checks_exhausted')
+    assert executor.pop_job_status_seen_at_launch() is None
 
 
 def test_fixed_submit_reasons_are_exempt_from_the_metric_cap():
