@@ -682,12 +682,12 @@ def test_config_fingerprint_accepts_keys_of_mixed_types(monkeypatch):
             }
         }})
     # pylint: disable-next=protected-access
-    first = sky_check._config_fingerprint()
+    first = sky_check.current_config_fingerprint()
     # pylint: disable-next=protected-access
-    assert sky_check._config_fingerprint() == first
+    assert sky_check.current_config_fingerprint() == first
     labels[8080] = 'api'
     # pylint: disable-next=protected-access
-    assert sky_check._config_fingerprint() != first
+    assert sky_check.current_config_fingerprint() != first
 
 
 def test_reader_with_a_warm_cache_does_not_probe(tmp_path, monkeypatch):

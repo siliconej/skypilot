@@ -612,7 +612,7 @@ def _clouds_from_names(names: Iterable[str]) -> List[sky_clouds.Cloud]:
     return [cloud for cloud in clouds_from_names if cloud is not None]
 
 
-def _config_fingerprint() -> str:
+def current_config_fingerprint() -> str:
     """A digest of the current request's merged config."""
     config = skypilot_config.to_dict()
     try:
@@ -724,12 +724,12 @@ def get_cached_enabled_clouds_or_refresh(
                             active_workspace, readable, writable))
             cached_enabled_clouds = _clouds_from_names(
                 _unstored_enabled_cloud_names(active_workspace, capability,
-                                              _config_fingerprint()))
+                                              current_config_fingerprint()))
     rechecked: Set[str] = set()
     reader_rechecked = _reader_rechecked()
     if reader_rechecked:  # Skips the fingerprint in the usual, empty case.
         rechecked = reader_rechecked.get(
-            (active_workspace, capability, _config_fingerprint()), set())
+            (active_workspace, capability, current_config_fingerprint()), set())
     if rechecked:
         known = {repr(cloud) for cloud in cached_enabled_clouds}
         cached_enabled_clouds = cached_enabled_clouds + _clouds_from_names(
@@ -768,7 +768,7 @@ def recheck_clouds(capability: sky_cloud.CloudCapability,
                          persist=persist).get(workspace, []))
     if not persist:
         _reader_rechecked().setdefault(
-            (workspace, capability, _config_fingerprint()),
+            (workspace, capability, current_config_fingerprint()),
             set()).update(enabled)
     return enabled
 
