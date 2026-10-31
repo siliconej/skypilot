@@ -611,6 +611,43 @@ def test_sriov_pod_is_coherent() -> None:
     assert '/dev/infiniband' not in mounts
 
 
+@pytest.mark.parametrize('case_name,high_availability',
+                         [('base_cpu', False), ('multinode', False),
+                          ('high_availability', True)])
+def test_pod_starts_ray_before_preparing_skypilot(
+        case_name: str, high_availability: bool) -> None:
+    """Ray starts without waiting for SkyPilot's dependencies.
+
+    The goldens omit the pod args, so this pins what they would miss. The
+    cluster's own wheel is installed by setup_commands; a PyPI copy in the pod
+    args only delays `ray start` on the head, and with it every worker.
+    Instead, uv's cache is warmed with a dry run while Ray starts. HA recovery
+    imports `sky` on a restarted pod before setup_commands run again, so HA
+    controllers keep the install.
+    """
+    rendered = _render(_build_variables(case_name))
+    pod = yaml.safe_load(
+        rendered)['available_node_types']['ray_head_default']['node_config']
+    args = '\n'.join(pod['spec']['containers'][0]['args'])
+    pypi_install = 'uv pip install skypilot[kubernetes,remote]'
+    warm_up = "uv pip install --dry-run 'skypilot[kubernetes,remote]'"
+    marker = 'touch /tmp/ray_skypilot_installation_complete'
+    assert (pypi_install in args) == high_availability
+    assert (warm_up in args) != high_availability
+    # Ray is installed and patched before it starts; setup_commands may
+    # install the wheel only once the marker is written, after anything that
+    # changes the environment, and the step still waits for Ray.
+    order = [
+        'RAY_INSTALLATION_COMMANDS', 'RAY_PATCHES_CMD', 'RAY_HEAD_START_COMMAND'
+    ]
+    order += [warm_up] if not high_availability else []
+    order += [marker, 'wait $SKY_RAY_START_PID']
+    positions = [args.index(s) for s in order]
+    assert positions == sorted(positions), order
+    if high_availability:
+        assert args.index(pypi_install) < args.index('RAY_HEAD_START_COMMAND')
+
+
 # Verbs Kubernetes' privilege-escalation prevention does NOT gate on RBAC
 # objects. `create` and `update` are checked against what the requester
 # already holds; deletion is not checked at all, so granting it to a workload
