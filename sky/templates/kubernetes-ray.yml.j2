@@ -1416,8 +1416,7 @@ available_node_types:
                 fi
               ) &
 
-              # STEP 2: Install conda, ray and skypilot (for dependencies); start
-              # ray cluster.
+              # STEP 2: Install conda and ray; start ray cluster.
               (
                 (
                 set -e
@@ -1461,9 +1460,20 @@ available_node_types:
                 {{ uv_installation_commands }}
                 {{ ray_installation_commands }}
 
+                # SkyPilot itself is not installed before `ray start`: nothing
+                # up to there imports it (the Ray patches and the hostNetwork
+                # probe are carried inline), and setup_commands installs the
+                # cluster's own wheel, with its dependencies, once this step
+                # marks Ray installed. A PyPI copy here only delayed `ray
+                # start`, and every worker waiting on it, and the wheel
+                # uninstalled it again.
+{% if high_availability %}
+                # HA recovery below imports `sky` on a restarted pod before
+                # setup_commands run again.
                 # set UV_SYSTEM_PYTHON to false in case the user provided docker image set it to true.
                 # unset PYTHONPATH and set CWD to $HOME to avoid user image interfering with SkyPilot runtime.
                 VIRTUAL_ENV=${SKY_RUNTIME_DIR:-$HOME}/skypilot-runtime UV_LINK_MODE=copy UV_SYSTEM_PYTHON=false {{sky_unset_pythonpath_and_set_cwd}} ~/.local/bin/uv pip install skypilot[kubernetes,remote]
+{% endif %}
                 # Wait (bounded) for the best-effort `patch` install to land
                 # before applying the Ray patches. An image may ship no `patch`
                 # and have no usable repo, so proceed after 60s rather than hang
@@ -1484,11 +1494,12 @@ available_node_types:
                 done
                 # Apply Ray patches (quality-of-life fixes: progress bar, log
                 # streaming). The patch payload is carried in this pod spec, not
-                # read out of the installed `sky`: this runs before the SkyPilot
-                # wheel is uploaded, so the only `sky` on the node is whatever
-                # `pip install skypilot` resolved to -- an unrelated release,
-                # whose patches target an unrelated Ray version. Reading them
-                # from there corrupts Ray whenever the two disagree.
+                # read out of an installed `sky`: this runs before the SkyPilot
+                # wheel is uploaded, so the node has no `sky` of the cluster's
+                # version -- at most an unrelated release (from the image, or
+                # from PyPI for HA controllers) whose patches target an
+                # unrelated Ray version. Reading them from there corrupts Ray
+                # whenever the two disagree.
                 # ray_patches_cmd self-guards on the Ray version it was
                 # generated for, and says so when it skips.
                 # Best-effort: apply_patches falls back to the Python `patch`
@@ -1497,9 +1508,11 @@ available_node_types:
                 # and continue rather than abort the launch -- the cluster comes
                 # up and runs without these patches.
                 {{ ray_patches_cmd }} || echo "WARNING: could not apply Ray patches; continuing without them.";
-                touch /tmp/ray_skypilot_installation_complete
-                echo "=== Ray and skypilot installation completed ==="
 
+                # Start Ray in the background, so the cache warm-up below does
+                # not delay it. A failure still fails this step: `wait` at the
+                # end returns Ray's exit status under `set -e`.
+                (
                 # Disable set -e, as we have some commands that are ok to fail
                 # after the ray start.
                 # TODO(zhwu): this is a hack, we should fix the commands that are
@@ -1542,6 +1555,23 @@ available_node_types:
                   set +e
                   {{ ray_worker_start_command }}
                 fi
+                ) &
+                SKY_RAY_START_PID=$!
+{% if not high_availability %}
+                # Meanwhile, warm uv's cache for the wheel's dependencies.
+                # setup_commands resolves them when it installs the wheel, and
+                # on a cold cache that takes seconds; it used to be warmed by
+                # the PyPI install removed above. --dry-run resolves without
+                # changing the environment, so it is safe next to a starting
+                # Ray. Best-effort: a failure only leaves the cache cold.
+                VIRTUAL_ENV=${SKY_RUNTIME_DIR:-$HOME}/skypilot-runtime UV_SYSTEM_PYTHON=false {{sky_unset_pythonpath_and_set_cwd}} ~/.local/bin/uv pip install --dry-run 'skypilot[kubernetes,remote]' \
+                  || echo "WARNING: could not warm the uv cache; continuing."
+{% endif %}
+                # setup_commands waits for this marker before it installs the
+                # wheel, so no two installs touch the environment at once.
+                touch /tmp/ray_skypilot_installation_complete
+                echo "=== Ray installation completed ==="
+                wait $SKY_RAY_START_PID
                 ) > /tmp/${STEPS[1]}.log 2>&1
                 if [ "$?" -ne "0" ]; then
                   {

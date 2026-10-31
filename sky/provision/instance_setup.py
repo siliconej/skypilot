@@ -222,9 +222,10 @@ def ray_patches_cmd(ray_version: str) -> str:
     """Shell snippet that patches Ray from a payload carried in the pod spec.
 
     Kubernetes patches Ray from the pod's own args, which run before the
-    SkyPilot wheel is uploaded. Reading the patches out of whatever
-    `pip install skypilot` resolved to would take them from an unrelated
-    release, whose patches target an unrelated Ray version.
+    SkyPilot wheel is uploaded. Any `sky` on the node then is an unrelated
+    release (baked into the image, or from PyPI for HA controllers), and
+    reading the patches out of it would take them from a release whose
+    patches target an unrelated Ray version.
 
     The version check is part of this command rather than a separate guard in
     the template, so the version the patches are applied *against* and the
@@ -283,9 +284,9 @@ def _host_network_probe_cmd(mode: str) -> str:
     sshd_config and restarting picks up the assigned port instead.
 
     The probe is shipped gzip+base64-inline rather than invoked as a
-    module because the K8s template installs stable skypilot from PyPI
-    before ray_head_start_command runs (the dev wheel ships later), so
-    neither `python -m sky.provision.kubernetes.host_network_probe` nor
+    module because the K8s template runs ray_head_start_command before
+    the cluster's SkyPilot wheel is installed (the dev wheel ships later),
+    so neither `python -m sky.provision.kubernetes.host_network_probe` nor
     a site-packages file lookup is reliable at probe time. The b64 form
     also keeps the payload on a single line, which is required to stay
     inside the rendered YAML's block-scalar indentation. Gzip cuts the
