@@ -1470,6 +1470,25 @@ class JobLibCodeGen:
         return cls._build(code)
 
     @classmethod
+    def get_job_status_and_submitted_timestamp(cls,
+                                               job_id: Optional[int] = None
+                                              ) -> str:
+        """Prints the job's statuses payload, then its submitted-at payload.
+
+        One round trip in place of get_job_status followed by
+        get_job_submitted_or_ended_timestamp_payload. It calls only the
+        functions those two call, so older cluster runtimes support it.
+        """
+        code = [
+            f'job_id = {job_id} if {job_id} is not None '
+            'else job_lib.get_latest_job_id()',
+            'print(job_lib.get_statuses_payload([job_id]), flush=True)',
+            'print(job_lib.get_job_submitted_or_ended_timestamp_payload('
+            'job_id, False), flush=True)',
+        ]
+        return cls._build(code)
+
+    @classmethod
     def get_log_dirs_for_jobs(cls, job_ids: Optional[List[str]]) -> str:
         code = [
             f'job_ids = {job_ids} if {job_ids} is not None '

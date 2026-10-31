@@ -251,6 +251,12 @@ class StrategyExecutor:
     # the infra cannot be reached.
     UNREACHABLE_INFRA_TIMEOUT_SECONDS = 60 * 60
 
+    # The job status the last launch saw on the cluster when it confirmed the
+    # job had started. A class default, so that executors built without
+    # __init__ (subclasses, tests) have it too. See
+    # pop_job_status_seen_at_launch.
+    _job_status_seen_at_launch: Optional[job_lib.JobStatus] = None
+
     def __init__(
         self,
         cluster_name: Optional[str],
@@ -309,6 +315,17 @@ class StrategyExecutor:
         self.starting_lock = starting_lock
         self.starting_signal = starting_signal
         self.file_mounts_blob_id = file_mounts_blob_id
+
+    def pop_job_status_seen_at_launch(self) -> Optional['job_lib.JobStatus']:
+        """The job status the last launch saw on the cluster, at most once.
+
+        A launch (or recovery) returns once it sees the job past INIT. A
+        short job can be finished by then; if so, the monitor loop checks it
+        at once instead of after its usual gap.
+        """
+        status = self._job_status_seen_at_launch
+        self._job_status_seen_at_launch = None
+        return status
 
     def set_strategy_config(self, config: dict) -> None:
         """Handle strategy-specific config from the job_recovery dict.
@@ -577,12 +594,14 @@ class StrategyExecutor:
         assert self.cluster_name is not None
         status = None
         reason: Optional[str] = None
+        self._job_status_seen_at_launch = None
         job_checking_retry_cnt = 0
         while job_checking_retry_cnt < MAX_JOB_CHECKING_RETRY:
             # Avoid the infinite loop, if any bug happens.
             job_checking_retry_cnt += 1
             runtime_status = None
             handle = None
+            job_submitted_at: Optional[float] = None
             try:
                 if managed_job_runtime.is_registered():
                     handle = await asyncio.to_thread(
@@ -629,13 +648,14 @@ class StrategyExecutor:
                 if runtime_status is not None:
                     status, transient_error_reason = runtime_status
                 else:
-                    status, transient_error_reason = (
-                        await managed_job_utils.get_job_status(
+                    # Fetches when the job was submitted along with its
+                    # status, saving a second command on the head node.
+                    status, job_submitted_at, transient_error_reason = (
+                        await managed_job_utils.get_job_status_and_submitted_at(
                             self.backend,
                             self.cluster_name,
                             job_id=self.job_id_on_pool_cluster,
-                            handle=handle,
-                            runtime_checked=True))
+                            handle=handle))
             except Exception as e:  # pylint: disable=broad-except
                 transient_error_reason = common_utils.format_exception(e)
                 # If any unexpected error happens, retry the job checking
@@ -661,12 +681,15 @@ class StrategyExecutor:
 
             # Check the job status until it is not in initialized status
             if status is not None and status > job_lib.JobStatus.INIT:
+                self._job_status_seen_at_launch = status
                 if managed_job_runtime.is_registered():
                     runtime_submitted_at = await asyncio.to_thread(
                         managed_job_runtime.get_job_submitted_at, handle,
                         self.cluster_name)
                     if runtime_submitted_at is not None:
                         return runtime_submitted_at, None
+                if job_submitted_at is not None:
+                    return job_submitted_at, None
                 try:
                     job_submitted_at = await asyncio.to_thread(
                         managed_job_utils.get_job_timestamp,
@@ -681,6 +704,7 @@ class StrategyExecutor:
                     reason = f':{_error_kind(e)}'
                     logger.info(f'Unexpected Exception: {e}\nFailed to get '
                                 'the job start timestamp. Retrying.')
+                    self._job_status_seen_at_launch = None
                     continue
             # Wait for the job to be started
             await asyncio.sleep(

@@ -1541,8 +1541,17 @@ class JobController:
             exit_codes: Optional[List[int]] = None
 
             if not force_transit_to_recovering:
-                await asyncio.sleep(
-                    _status_check_gap_seconds(first_check=first_status_check))
+                seen_at_launch = executor.pop_job_status_seen_at_launch()
+                if seen_at_launch is not None and seen_at_launch.is_terminal():
+                    # The launch (or recovery) that just returned already saw
+                    # the job finish; there is nothing to wait for.
+                    logger.info(f'Task {task_id} already finished when its '
+                                f'launch returned ({seen_at_launch}); '
+                                'checking it now.')
+                else:
+                    await asyncio.sleep(
+                        _status_check_gap_seconds(
+                            first_check=first_status_check))
                 first_status_check = False
 
                 # Check the network connection to avoid false alarm for job
