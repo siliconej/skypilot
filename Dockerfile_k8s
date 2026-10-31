@@ -72,8 +72,13 @@ RUN ARCH=${TARGETARCH:-$(case "$(uname -m)" in \
     curl -LsSf https://astral.sh/uv/install.sh | sh && \
     $HOME/.local/bin/uv venv ~/skypilot-runtime --seed --python=3.10 && \
     source ~/skypilot-runtime/bin/activate && \
+    # setuptools<70 and click<8.3.0: the pins RAY_INSTALLATION_COMMANDS
+    # (sky/skylet/constants.py) applies when a pod starts. Met here, the pod
+    # only checks them; otherwise it downloads setuptools from PyPI on every
+    # pod before it can start Ray (0.5 s, and over 10 s when PyPI is slow).
     $HOME/.local/bin/uv pip install 'skypilot-nightly[remote,kubernetes]' \
-        'ray[default]==2.56.1' 'pycryptodome==3.12.0' && \
+        'ray[default]==2.56.1' 'pycryptodome==3.12.0' \
+        'setuptools<70' 'click<8.3.0' && \
     $HOME/.local/bin/uv pip uninstall skypilot-nightly && \
     curl -LO "https://dl.k8s.io/release/v1.33.12/bin/linux/$ARCH/kubectl" && \
     # Install kubectl to user's local bin instead of system path to avoid
