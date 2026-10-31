@@ -2225,7 +2225,26 @@ def read_provision_status_from_log(
         provisioning has not emitted a spinner yet, or if it has finished
         (an EXIT control clears the message).
     """
+    pos, msg, _ = _read_controller_log(log_path, pos, current_msg)
+    return pos, msg
+
+
+def _read_controller_log(
+        log_path: str, pos: int,
+        current_msg: Optional[str]) -> Tuple[int, Optional[str], bool]:
+    """read_provision_status_from_log, plus whether a plain line was read.
+
+    Plain (non-payload) lines are the controller's own log lines. It writes
+    few of them, and they mark its steps, including the ones that change the
+    job's status: "Cluster launch completed" just before RUNNING, and the
+    success and cleanup lines around SUCCEEDED. The relayed spinner payloads,
+    which arrive every second while the cluster is provisioned, are not plain.
+
+    Returns:
+        A tuple ``(new_pos, latest_msg, saw_plain_line)``.
+    """
     msg = current_msg
+    saw_plain_line = False
     try:
         # If the log was truncated or recreated (e.g. controller recovery or a
         # job retry), the saved offset can be past the new EOF; restart from the
@@ -2249,6 +2268,7 @@ def read_provision_status_from_log(
                 is_payload, decoded = message_utils.decode_payload(
                     line, raise_for_mismatch=False)
                 if not is_payload:
+                    saw_plain_line = True
                     continue
                 control, encoded_status = rich_utils.Control.decode(decoded)
                 if control in (rich_utils.Control.INIT,
@@ -2267,7 +2287,7 @@ def read_provision_status_from_log(
         # Best-effort: the log may not exist yet (FileNotFoundError) or be
         # mid-write; never let log following break job-log streaming.
         pass
-    return pos, msg
+    return pos, msg, saw_plain_line
 
 
 def _is_relayed_status_payload_line(line: str) -> bool:
@@ -2693,11 +2713,15 @@ def _stream_logs_by_id(job_id: int, follow: bool, tail: Optional[int],
     controller_log_path = controller_log_file_for_job(job_id)
     provision_pos = 0
     provision_msg: Optional[str] = None
+    # Whether the controller logged a line of its own since the last status
+    # check. See the wait loop below.
+    controller_logged = False
 
     def _latest_provision_status_msg() -> Optional[str]:
-        nonlocal provision_pos, provision_msg
-        provision_pos, provision_msg = read_provision_status_from_log(
+        nonlocal provision_pos, provision_msg, controller_logged
+        provision_pos, provision_msg, saw_plain_line = _read_controller_log(
             controller_log_path, provision_pos, provision_msg)
+        controller_logged = controller_logged or saw_plain_line
         return provision_msg
 
     # Whether this tail streamed any task's logs while the task ran, from
@@ -2973,8 +2997,14 @@ def _stream_logs_by_id(job_id: int, follow: bool, tail: Optional[int],
                 parked_reason_read = False
                 # Poll the controller log frequently for provisioning spinner
                 # updates, but only re-check the (more expensive) managed job
-                # status every JOB_STATUS_CHECK_GAP_SECONDS.
+                # status when the controller logs a line of its own, or every
+                # JOB_STATUS_CHECK_GAP_SECONDS. The controller logs around each
+                # status change, so this sees RUNNING within about a second. A
+                # job that finishes quickly is RUNNING for only a few seconds:
+                # a check every 15 s alone usually misses it, and then finds
+                # the job finished up to 15 s after it did.
                 waited = 0.0
+                controller_logged = False
                 while True:
                     context_utils.raise_if_canceled()
                     # Keep the "Waiting for task to start" context and append
@@ -2997,7 +3027,8 @@ def _stream_logs_by_id(job_id: int, follow: bool, tail: Optional[int],
                     if msg != prev_msg:
                         status_display.update(msg)
                         prev_msg = msg
-                    if waited >= JOB_STATUS_CHECK_GAP_SECONDS:
+                    if (controller_logged or
+                            waited >= JOB_STATUS_CHECK_GAP_SECONDS):
                         break
                     time.sleep(_PROVISION_LOG_POLL_GAP_SECONDS)
                     waited += _PROVISION_LOG_POLL_GAP_SECONDS

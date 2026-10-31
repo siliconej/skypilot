@@ -1554,6 +1554,31 @@ class TestReadProvisionStatusFromLog:
         assert msg2 == 'Preparing SkyPilot runtime (1/3)'
         assert pos2 > pos
 
+    def test_reports_whether_the_controller_logged_a_line(self, tmp_path):
+        """Plain lines are the controller's own; spinner payloads are not."""
+        from sky.utils import rich_utils
+        path = tmp_path / 'controller.log'
+        path.write_text(self._status_line(rich_utils.Control.INIT, 'Launching'))
+        pos, msg, saw_plain = jobs_utils._read_controller_log(
+            str(path), 0, None)
+        assert (msg, saw_plain) == ('Launching', False)
+
+        # A line still being written is not read yet.
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write('Cluster launch completed')
+        pos, msg, saw_plain = jobs_utils._read_controller_log(
+            str(path), pos, msg)
+        assert not saw_plain
+
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(' in 30.50s\n')
+        pos, msg, saw_plain = jobs_utils._read_controller_log(
+            str(path), pos, msg)
+        assert (msg, saw_plain) == ('Launching', True)
+
+        # Only lines appended since pos count.
+        assert not jobs_utils._read_controller_log(str(path), pos, msg)[2]
+
     def test_stop_control_clears_message(self, tmp_path):
         from sky.utils import rich_utils
         path = tmp_path / 'controller.log'
@@ -1923,8 +1948,8 @@ class TestStreamLogsByIdJobFinishedBetweenChecks:
         # The cluster is never seen while the job is RUNNING.
         monkeypatch.setattr(jobs_utils.global_user_state,
                             'get_handle_from_cluster_name', lambda _: None)
-        monkeypatch.setattr(jobs_utils, 'read_provision_status_from_log',
-                            lambda path, pos, msg: (pos, msg))
+        monkeypatch.setattr(jobs_utils, '_read_controller_log',
+                            lambda path, pos, msg: (pos, msg, False))
         monkeypatch.setattr(jobs_utils, '_parked_launch_reason',
                             lambda *args: None)
         monkeypatch.setattr(jobs_utils.time, 'sleep', lambda _: None)
@@ -1932,6 +1957,56 @@ class TestStreamLogsByIdJobFinishedBetweenChecks:
         mock_logs.get_log_reader.return_value = reader
         monkeypatch.setattr(jobs_utils, 'logs', mock_logs)
         return mock_state
+
+    def _sleeps_before_second_check(self, monkeypatch, tmp_path,
+                                    plain_line_on_read):
+        """Sleeps the tail takes between its first two status checks.
+
+        plain_line_on_read: the read of the controller log (1-based) that
+            finds a line the controller logged, or None for none.
+        """
+        log_file = tmp_path / 'run.log'
+        log_file.write_text(
+            f'{jobs_utils.log_lib.LOG_FILE_START_STREAMING_AT}\njob output\n',
+            encoding='utf-8')
+        mock_state = self._patch_job(
+            monkeypatch, managed_job_state.ManagedJobStatus.SUCCEEDED,
+            [str(log_file)])
+        reads = [0]
+
+        def read_controller_log(path, pos, msg):
+            reads[0] += 1
+            return pos, msg, reads[0] == plain_line_on_read
+
+        monkeypatch.setattr(jobs_utils, '_read_controller_log',
+                            read_controller_log)
+        sleeps: List[float] = []
+        monkeypatch.setattr(jobs_utils.time, 'sleep', sleeps.append)
+        sleeps_at_check: List[int] = []
+        statuses = iter(mock_state.get_latest_task_id_status.side_effect)
+
+        def latest_task_id_status(_):
+            sleeps_at_check.append(len(sleeps))
+            return next(statuses)
+
+        mock_state.get_latest_task_id_status.side_effect = latest_task_id_status
+
+        jobs_utils.stream_logs_by_id(5, follow=True)
+
+        assert len(sleeps_at_check) == 2
+        return sleeps_at_check[1] - sleeps_at_check[0]
+
+    def test_checks_status_as_soon_as_the_controller_logs(
+            self, monkeypatch, tmp_path):
+        """The controller logs around each status change; a short job's
+        RUNNING lasts only seconds, and a check every 15 s misses it."""
+        assert self._sleeps_before_second_check(monkeypatch, tmp_path, 3) == 2
+
+    def test_checks_status_every_gap_otherwise(self, monkeypatch, tmp_path):
+        assert self._sleeps_before_second_check(
+            monkeypatch, tmp_path,
+            None) == (jobs_utils.JOB_STATUS_CHECK_GAP_SECONDS /
+                      jobs_utils._PROVISION_LOG_POLL_GAP_SECONDS)
 
     def test_prints_persisted_logs(self, monkeypatch, tmp_path, capsys):
         log_file = tmp_path / 'run.log'
@@ -2071,8 +2146,8 @@ class TestStreamLogsByIdStoreFollowAcrossTasks:
         monkeypatch.setattr(
             jobs_utils.global_user_state, 'get_handle_from_cluster_name', lambda
             _: MagicMock(spec=jobs_utils.backends.CloudVmRayResourceHandle))
-        monkeypatch.setattr(jobs_utils, 'read_provision_status_from_log',
-                            lambda path, pos, msg: (pos, msg))
+        monkeypatch.setattr(jobs_utils, '_read_controller_log',
+                            lambda path, pos, msg: (pos, msg, False))
         monkeypatch.setattr(jobs_utils.time, 'sleep', lambda _: None)
         followed = []
 
