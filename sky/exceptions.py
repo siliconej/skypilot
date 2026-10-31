@@ -372,6 +372,16 @@ class ClusterSetUpError(Exception):
     pass
 
 
+class InstancesLostDuringSetupError(ClusterSetUpError):
+    """Raised when an instance disappears while the cluster is being set up.
+
+    E.g. a pod deleted (`kubectl delete pod`, an eviction) after it started
+    running but before the launch finished. Nothing brings such an instance
+    back, so the setup cannot complete; it has to be relaunched.
+    """
+    pass
+
+
 class ClusterDoesNotExist(ValueError):
     """Raise when trying to operate on a cluster that does not exist."""
     # This extends ValueError for compatibility reasons - we used to throw
