@@ -146,6 +146,19 @@ RAY_PRLIMIT = (
     'echo "Failed to raise the open files limit of raylet $id." >&2; done; '
     'true;')
 
+# `ray stop`, but only if Ray is running here. A freshly booted node has no
+# Ray to stop, yet `ray stop` still costs a Python start (1.5-4 s on a busy
+# node) before `ray start` can begin; on the head, that delays every worker,
+# which waits for the head's GCS port. Ray left over from an earlier start is
+# stopped as before. The bracketed first letters keep the pattern from
+# matching the shell that runs this command, whose command line contains it.
+# Without pgrep (images with no procps), always stop, as before.
+RAY_STOP_IF_RUNNING = (
+    'if ! command -v pgrep > /dev/null 2>&1 || pgrep -f '
+    '"ray/core/src/ray/[g]cs/gcs_server|ray/core/src/ray/[r]aylet/raylet|'
+    'ray/[d]ashboard/" > /dev/null 2>&1; '
+    f'then {constants.SKY_RAY_CMD} stop; fi; ')
+
 # Raise the *soft* open files limit of the current shell to _TARGET_NOFILE,
 # falling back to the hard limit when that is lower (see RAY_PRLIMIT above for
 # why the hard limit cannot simply be raised). `-Sn` rather than plain `-n` is
@@ -750,7 +763,7 @@ def ray_head_start_command(custom_resource: Optional[str],
             ray_options += f' --{key}={value}'
 
     cmd = (
-        _host_network_probe_cmd('head') + f'{constants.SKY_RAY_CMD} stop; '
+        _host_network_probe_cmd('head') + RAY_STOP_IF_RUNNING +
         'RAY_SCHEDULER_EVENTS=0 RAY_DEDUP_LOGS=0 '
         # worker_maximum_startup_concurrency controls the maximum number of
         # workers that can be started concurrently. However, it also controls
@@ -812,9 +825,9 @@ def ray_worker_start_command(custom_resource: Optional[str],
             'grep "gcs-address=${SKYPILOT_RAY_HEAD_IP}:${SKYPILOT_RAY_PORT}" '
             f'|| {{ {_host_network_probe_cmd("worker")}{cmd} }}')
         return cmd
-    # `ray stop` first, so the ports really are free by the time the probe
-    # runs and the assertion means what it says.
-    cmd = f'{constants.SKY_RAY_CMD} stop; ' + cmd
+    # Stop any Ray running here first, so the ports really are free by the
+    # time the probe runs and the assertion means what it says.
+    cmd = RAY_STOP_IF_RUNNING + cmd
     return _host_network_probe_cmd('worker') + cmd
 
 
