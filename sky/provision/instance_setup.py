@@ -386,10 +386,27 @@ RAY_HEAD_WAIT_INITIALIZED_COMMAND = (
     'sleep 0.5; '
     'done;')
 
+# Shell check for "skylet is running with the current version", mirroring the
+# PID-file path of sky.skylet.attempt_skylet. attempt_skylet imports `sky`,
+# which takes seconds on a small pod, only to find nothing to do in this case.
+# Anything else (no PID file, dead or zombie process, stale version, no /proc)
+# fails the check and falls through to attempt_skylet.
+_SKYLET_RUNNING_LATEST_CHECK = (
+    '{ [ "$(cat '
+    f'{constants.SKY_RUNTIME_DIR}/{constants.SKYLET_VERSION_FILE} '
+    f'2>/dev/null)" = "{constants.SKYLET_VERSION}" ] && '
+    f'_sky_pid=$(cat {constants.SKY_RUNTIME_DIR}/{constants.SKYLET_PID_FILE} '
+    '2>/dev/null) && [ -n "$_sky_pid" ] && '
+    'tr "\\0" " " < "/proc/$_sky_pid/cmdline" 2>/dev/null | '
+    'grep -q "sky\\.skylet\\.skylet" && '
+    'echo "Skylet is running with the latest version '
+    f'{constants.SKYLET_VERSION}."; }}')
+
 # Restart skylet when the version does not match to keep the skylet up-to-date.
 # We need to activate the python environment to make sure autostop in skylet
 # can find the cloud SDK/CLI in PATH.
 MAYBE_SKYLET_RESTART_CMD = (f'{constants.ACTIVATE_SKY_REMOTE_PYTHON_ENV}; '
+                            f'{_SKYLET_RUNNING_LATEST_CHECK} || '
                             f'{constants.SKY_PYTHON_CMD} -m '
                             'sky.skylet.attempt_skylet;')
 

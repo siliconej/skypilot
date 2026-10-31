@@ -1,13 +1,16 @@
 """Tests for sky.provision.instance_setup."""
+import os
 import resource
 import subprocess
+import sys
 from typing import Tuple
 
 import pytest
 
 from sky.provision import instance_setup
+from sky.skylet import constants
 
-# pylint: disable=protected-access
+# pylint: disable=protected-access,redefined-outer-name
 _TARGET = instance_setup._TARGET_NOFILE
 
 
@@ -54,3 +57,76 @@ def test_raise_nofile_limit_reaches_target():
     process_hard = _process_hard_nofile_limit()
     hard = _TARGET * 2 if process_hard < 0 else process_hard
     assert _raise_nofile_limit(soft=1024, hard=hard) == (_TARGET, hard)
+
+
+_FALLBACK = 'FALLBACK_TO_ATTEMPT_SKYLET'
+
+
+@pytest.fixture
+def skylet_runtime_dir(tmp_path):
+    """A runtime dir holding a live process that looks like skylet."""
+    if not os.path.isdir('/proc/self'):
+        pytest.skip('needs /proc')
+    (tmp_path / '.sky').mkdir()
+    # The check matches on the module name in the process' command line.
+    proc = subprocess.Popen([
+        sys.executable, '-c', 'import time; time.sleep(60)', 'sky.skylet.skylet'
+    ])
+    try:
+        yield tmp_path, proc
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def _run_skylet_check(runtime_dir, version: str, pid: str) -> str:
+    """Runs the shell fast path of MAYBE_SKYLET_RESTART_CMD."""
+    (runtime_dir / constants.SKYLET_VERSION_FILE).write_text(version + '\n')
+    (runtime_dir / constants.SKYLET_PID_FILE).write_text(pid + '\n')
+    script = (f'{instance_setup._SKYLET_RUNNING_LATEST_CHECK} || '
+              f'echo {_FALLBACK}')
+    return subprocess.run(
+        ['bash', '-c', script],
+        env={
+            **os.environ, constants.SKY_RUNTIME_DIR_ENV_VAR_KEY:
+                str(runtime_dir)
+        },
+        capture_output=True,
+        text=True,
+        check=True).stdout
+
+
+def test_skylet_check_skips_attempt_skylet_when_up_to_date(skylet_runtime_dir):
+    runtime_dir, proc = skylet_runtime_dir
+    out = _run_skylet_check(runtime_dir, constants.SKYLET_VERSION,
+                            str(proc.pid))
+    assert 'Skylet is running with the latest version' in out
+    assert _FALLBACK not in out
+
+
+def test_skylet_check_falls_through_on_stale_version(skylet_runtime_dir):
+    runtime_dir, proc = skylet_runtime_dir
+    out = _run_skylet_check(runtime_dir, 'stale', str(proc.pid))
+    assert out.strip() == _FALLBACK
+
+
+def test_skylet_check_falls_through_on_dead_process(skylet_runtime_dir):
+    runtime_dir, proc = skylet_runtime_dir
+    proc.kill()
+    proc.wait()
+    out = _run_skylet_check(runtime_dir, constants.SKYLET_VERSION,
+                            str(proc.pid))
+    assert out.strip() == _FALLBACK
+
+
+def test_skylet_check_falls_through_on_non_skylet_process(tmp_path):
+    (tmp_path / '.sky').mkdir()
+    out = _run_skylet_check(tmp_path, constants.SKYLET_VERSION,
+                            str(os.getpid()))
+    assert out.strip() == _FALLBACK
+
+
+def test_skylet_check_falls_through_without_pid_file(tmp_path):
+    (tmp_path / '.sky').mkdir()
+    out = _run_skylet_check(tmp_path, constants.SKYLET_VERSION, '')
+    assert out.strip() == _FALLBACK

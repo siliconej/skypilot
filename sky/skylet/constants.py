@@ -496,8 +496,12 @@ SKYPILOT_WHEEL_INSTALLATION_COMMANDS = (
     'if [ "{cloud}" = "azure" ]; then '
     f'{SKY_UV_PIP_CMD} install --prerelease=allow "{dependencies.AZURE_CLI}";'
     'fi;'
-    # Install skypilot from wheel
-    f'{SKY_UV_PIP_CMD} install "$(echo ~/.sky/wheels/{{sky_wheel_hash}}/'
+    # Install skypilot from wheel. --compile-bytecode: unlike pip, uv does not
+    # write .pyc files by default, so the first `python -m sky...` on a new
+    # node (e.g. starting skylet) would otherwise compile hundreds of modules,
+    # which takes seconds on a CPU-limited Kubernetes pod.
+    f'{SKY_UV_PIP_CMD} install --compile-bytecode '
+    '"$(echo ~/.sky/wheels/{{sky_wheel_hash}}/'
     f'skypilot-{_sky_version}*.whl)[{{cloud}}, remote]" && '
     'echo "{sky_wheel_hash}" > ~/.sky/wheels/current_sky_wheel_hash || '
     'exit 1; }; ')
