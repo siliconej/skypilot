@@ -1,15 +1,23 @@
 """Unit tests for sky.jobs.utils functions."""
+import os
 import re
+import shlex
+import subprocess
+import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 from unittest.mock import MagicMock
 
 import pytest
 
+from sky import backends
 from sky import exceptions
 from sky.jobs import constants as managed_job_constants
 from sky.jobs import state as managed_job_state
 from sky.jobs import utils as jobs_utils
+from sky.skylet import constants
+from sky.skylet import job_lib
+from sky.utils import message_utils
 
 
 class TestClusterHandleNotRequired:
@@ -2663,3 +2671,96 @@ class TestFormatJobTableDynamicMembers:
                                             show_user=False,
                                             return_rows=True)
         assert self._id_task_status(table) == [('70', '-', 'RUNNING')]
+
+
+class TestJobStatusAndSubmittedAt:
+    """One head command for a job's status and submitted-at time."""
+
+    def _backend(self, returncode=0, stdout='', stderr=''):
+        backend = MagicMock()
+        backend.run_on_head.return_value = (returncode, stdout, stderr)
+        return backend
+
+    def _handle(self, grpc=False):
+        return MagicMock(is_grpc_enabled_with_flag=grpc)
+
+    def test_one_command_returns_both(self):
+        stdout = ('a warning printed by the shell\n' +
+                  message_utils.encode_payload({'3': 'SUCCEEDED'}) + '\n' +
+                  message_utils.encode_payload(1234.5))
+        backend = self._backend(stdout=stdout)
+        assert jobs_utils._job_status_and_submitted_at_on_head(
+            backend, self._handle(), 3) == (job_lib.JobStatus.SUCCEEDED, 1234.5)
+        backend.run_on_head.assert_called_once()
+        backend.get_job_status.assert_not_called()
+
+    def test_missing_timestamp_is_none(self):
+        """The caller then falls back to get_job_timestamp."""
+        backend = self._backend(
+            stdout=message_utils.encode_payload({'3': 'RUNNING'}))
+        assert jobs_utils._job_status_and_submitted_at_on_head(
+            backend, self._handle(), 3) == (job_lib.JobStatus.RUNNING, None)
+
+    def test_grpc_fetches_only_the_status(self):
+        """Over gRPC each call is cheap; the timestamp is the caller's."""
+        backend = self._backend()
+        backend.get_job_status.return_value = {3: job_lib.JobStatus.RUNNING}
+        assert jobs_utils._job_status_and_submitted_at_on_head(
+            backend, self._handle(grpc=True),
+            3) == (job_lib.JobStatus.RUNNING, None)
+        backend.run_on_head.assert_not_called()
+
+    @pytest.mark.parametrize('returncode,stdout,reason', [
+        (255, '', 'Returncode: 255'),
+        (0, '', 'produced no output'),
+    ])
+    @pytest.mark.asyncio
+    async def test_failures_are_transient(self, returncode, stdout, reason):
+        """As in get_job_status: the caller retries instead of failing."""
+        backend = self._backend(returncode=returncode,
+                                stdout=stdout,
+                                stderr='pod not found')
+        backend_handle = MagicMock(spec=backends.CloudVmRayResourceHandle)
+        backend_handle.is_grpc_enabled_with_flag = False
+        status, submitted_at, transient = (
+            await
+            jobs_utils.get_job_status_and_submitted_at(backend,
+                                                       'cluster',
+                                                       3,
+                                                       handle=backend_handle))
+        assert (status, submitted_at) == (None, None)
+        assert reason in transient
+
+    @pytest.mark.asyncio
+    async def test_missing_cluster(self, monkeypatch):
+        monkeypatch.setattr(jobs_utils.global_user_state,
+                            'get_handle_from_cluster_name', lambda _: None)
+        assert await jobs_utils.get_job_status_and_submitted_at(
+            MagicMock(), 'cluster', None) == (None, None, None)
+
+    @pytest.mark.parametrize('job_id', [1, None])
+    def test_codegen_against_a_real_job_table(self, tmp_path, job_id):
+        """The generated code runs and prints what the parser expects.
+
+        job_id None means the latest job, as in the other codegens.
+        """
+        setup = ('from sky.skylet import job_lib; '
+                 "job_lib.add_job('j', 'u', 'ts', 'r'); "
+                 'job_lib.set_job_started(1)')
+        cmd = job_lib.JobLibCodeGen.get_job_status_and_submitted_timestamp(
+            job_id)
+        code = shlex.split(cmd)[-1]
+        env = dict(os.environ)
+        env[constants.SKY_RUNTIME_DIR_ENV_VAR_KEY] = str(tmp_path)
+        subprocess.run([sys.executable, '-c', setup], env=env, check=True)
+        before = time.time()
+        stdout = subprocess.run([sys.executable, '-c', code],
+                                env=env,
+                                check=True,
+                                capture_output=True,
+                                text=True).stdout
+        backend = self._backend(stdout=stdout)
+        status, submitted_at = jobs_utils._job_status_and_submitted_at_on_head(
+            backend, self._handle(), job_id)
+        assert status == job_lib.JobStatus.RUNNING
+        assert isinstance(submitted_at, float) and submitted_at <= before

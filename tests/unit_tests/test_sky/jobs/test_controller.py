@@ -3094,7 +3094,8 @@ class TestStatusCheckGapJitter:
                     task_id=0,
                     task=task,
                     cluster_name='cluster',
-                    executor=MagicMock(),
+                    executor=MagicMock(
+                        **{'pop_job_status_seen_at_launch.return_value': None}),
                     status_logger=managed_job_utils.JobStatusLogger(),
                     callback_func=AsyncMock())
 
@@ -3111,6 +3112,68 @@ class TestStatusCheckGapJitter:
         assert all(self._LOW <= s <= self._HIGH for s in sleeps[1:]), sleeps
         assert abs(statistics.mean(sleeps[1:]) - self._GAP) < 0.3
         assert len(set(sleeps[1:])) == len(sleeps) - 1
+
+
+class TestFirstCheckAfterLaunch:
+    """The monitor loop skips its first gap when the launch saw the job end.
+
+    A launch returns once it sees the job past INIT, and a short job can be
+    over by then. Waiting up to a whole gap to find that out again only
+    delays the job's end.
+    """
+
+    class _StopLoop(Exception):
+        pass
+
+    async def _sleeps_before_first_check(self, seen_at_launch):
+        """Runs the loop up to its first status check; returns the sleeps."""
+
+        async def stop(*args, **kwargs):
+            raise self._StopLoop()
+
+        task = MagicMock()
+        task.num_nodes = 1
+        instance = MagicMock()
+        instance._job_id = 1
+        instance._pool = None
+        executor = MagicMock(
+            **{'pop_job_status_seen_at_launch.return_value': seen_at_launch})
+        sleep = AsyncMock(return_value=None)
+        with patch.object(managed_job_utils, 'get_job_status',
+                          new=AsyncMock(side_effect=stop)), \
+             patch.object(controller_module.backend_utils,
+                          'async_check_network_connection',
+                          new=AsyncMock(return_value=None)), \
+             patch.object(controller_module.managed_job_runtime,
+                          'is_registered', return_value=False), \
+             patch.object(controller_module.asyncio, 'sleep', new=sleep):
+            with pytest.raises(self._StopLoop):
+                await JobController._monitor_one_task_impl(
+                    instance,
+                    task_id=0,
+                    task=task,
+                    cluster_name='cluster',
+                    executor=executor,
+                    status_logger=managed_job_utils.JobStatusLogger(),
+                    callback_func=AsyncMock())
+        executor.pop_job_status_seen_at_launch.assert_called_once()
+        return [call.args[0] for call in sleep.call_args_list]
+
+    @pytest.mark.parametrize('status', [
+        job_lib.JobStatus.SUCCEEDED, job_lib.JobStatus.FAILED,
+        job_lib.JobStatus.CANCELLED
+    ])
+    @pytest.mark.asyncio
+    async def test_checks_at_once_when_launch_saw_the_job_end(self, status):
+        assert await self._sleeps_before_first_check(status) == []
+
+    @pytest.mark.parametrize('status', [None, job_lib.JobStatus.RUNNING])
+    @pytest.mark.asyncio
+    async def test_waits_a_jittered_gap_otherwise(self, status):
+        with patch.object(controller_module, 'random', random.Random(0)):
+            sleeps = await self._sleeps_before_first_check(status)
+        assert len(sleeps) == 1
+        assert 0 <= sleeps[0] <= managed_job_utils.JOB_STATUS_CHECK_GAP_SECONDS
 
 
 @pytest.fixture(autouse=True)
