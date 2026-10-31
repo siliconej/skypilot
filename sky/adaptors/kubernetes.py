@@ -69,6 +69,28 @@ CONNECTION_POOL_MAXSIZE = 4
 logger = sky_logging.init_logger(__name__)
 
 
+class _PoolFullFilter(logging.Filter):
+    """Drops urllib3's "Connection pool is full" warning for our clients.
+
+    Going past CONNECTION_POOL_MAXSIZE is by design (e.g. creating or
+    inspecting more than that many pods in parallel), and urllib3 warns each
+    time it closes one of the extra connections. _api_logging_decorator keeps
+    the urllib3 logger at ERROR, but any kubernetes.client.Configuration built
+    elsewhere, or in another thread mid-call, resets it to WARNING, so the
+    warning still reached users. A filter on the logger is not undone by a
+    level reset, and it takes no lock per record.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not (isinstance(record.msg, str) and
+                    record.msg.startswith('Connection pool is full') and
+                    isinstance(record.args, tuple) and len(record.args) == 2 and
+                    record.args[1] == CONNECTION_POOL_MAXSIZE)
+
+
+logging.getLogger('urllib3.connectionpool').addFilter(_PoolFullFilter())
+
+
 def _api_logging_decorator(logger_src: str, level: int):
     """Decorator to keep a logger at the given level for API calls.
 

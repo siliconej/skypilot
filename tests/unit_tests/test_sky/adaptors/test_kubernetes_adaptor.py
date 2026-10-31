@@ -481,3 +481,25 @@ def test_urllib3_log_suppression_survives_client_construction(monkeypatch):
     finally:
         annotations.clear_request_level_cache()
         original_set_level(original_level)
+
+
+@pytest.mark.parametrize('pool_size,shown',
+                         [(kubernetes.CONNECTION_POOL_MAXSIZE, False),
+                          (kubernetes.CONNECTION_POOL_MAXSIZE + 6, True)])
+def test_pool_full_warning_hidden_for_capped_clients(caplog, pool_size, shown):
+    """Only the warning from our deliberately capped pools is dropped.
+
+    The urllib3 logger is left at WARNING here, as a Configuration built
+    elsewhere would leave it, so the filter alone has to hide it.
+    """
+    pool_logger = logging.getLogger('urllib3.connectionpool')
+    pool_logger.setLevel(logging.WARNING)
+    with caplog.at_level(logging.WARNING, logger='urllib3.connectionpool'):
+        # The exact call urllib3 makes when it discards a connection.
+        pool_logger.warning(
+            'Connection pool is full, discarding connection: %s. '
+            'Connection pool size: %s', '127.0.0.1', pool_size)
+        pool_logger.warning('Retrying after connection broken')
+    messages = [r.getMessage() for r in caplog.records]
+    assert any('Connection pool is full' in m for m in messages) == shown
+    assert any('Retrying' in m for m in messages)
