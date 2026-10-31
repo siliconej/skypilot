@@ -1,6 +1,7 @@
 """Cloud-neutral VM provision utils."""
 import collections
 from concurrent import futures
+import contextlib
 import contextvars
 import dataclasses
 import json
@@ -10,7 +11,7 @@ import socket
 import subprocess
 import time
 import traceback
-from typing import Callable, Dict, List, Optional, Tuple, TypeVar
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar
 
 import colorama
 
@@ -61,6 +62,15 @@ _K8S_RAY_READY_TIMEOUT_SECONDS = 90
 # Extra time the remote call for that wait gets beyond the wait itself, to
 # cover the transport and the interpreter start on the head.
 _RAY_WAIT_CALL_SLACK_SECONDS = 30
+# The wait runs in calls of at most this long; between calls the instances are
+# checked, so a pod deleted mid-wait fails the launch within about this long
+# instead of after the whole timeout. Ray is usually ready within the first
+# call, which returns as soon as it is.
+_RAY_WAIT_CHUNK_SECONDS = 10
+# An instance must look lost twice, this far apart, before setup is failed: a
+# single list response can omit an instance that is still there (e.g. a
+# caching proxy or a virtual-cluster syncer serving a partial view).
+_LOST_INSTANCE_CONFIRM_SECONDS = 2
 
 
 def _run_alongside(main: Callable[[], T], background: Callable[[], None]) -> T:
@@ -83,6 +93,76 @@ def _run_alongside(main: Callable[[], T], background: Callable[[], None]) -> T:
         result = main()
         background_future.result()
     return result
+
+
+def _lost_instances(cloud_name: str, cluster_name: resources_utils.ClusterName,
+                    provider_config: Optional[Dict[str, Any]],
+                    instance_ids: List[str]) -> Dict[str, str]:
+    """Returns the instances of `instance_ids` that are gone, with why.
+
+    Gone means missing from the provider, terminated or stopped: an instance
+    that was running for this launch and will not be back for it.
+    """
+    statuses = provision.query_instances(cloud_name,
+                                         cluster_name.display_name,
+                                         cluster_name.name_on_cloud,
+                                         provider_config,
+                                         non_terminated_only=False)
+    lost: Dict[str, str] = {}
+    for instance_id in instance_ids:
+        status, reason = statuses.get(instance_id, (None, None))
+        if status is None or status == status_lib.ClusterStatus.STOPPED:
+            lost[instance_id] = reason or ('not found'
+                                           if status is None else 'stopped')
+    return lost
+
+
+def _raise_if_instances_lost(cloud_name: str,
+                             cluster_name: resources_utils.ClusterName,
+                             provider_config: Optional[Dict[str, Any]],
+                             instance_ids: List[str]) -> None:
+    """Raises InstancesLostDuringSetupError if an instance is gone.
+
+    Raises nothing else: a failed check (e.g. the provider's API briefly
+    unreachable) must not fail a launch that may be healthy.
+    """
+    try:
+        lost = _lost_instances(cloud_name, cluster_name, provider_config,
+                               instance_ids)
+        if lost:
+            time.sleep(_LOST_INSTANCE_CONFIRM_SECONDS)
+            lost = _lost_instances(cloud_name, cluster_name, provider_config,
+                                   instance_ids)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.debug('Could not check whether the instances of '
+                     f'{cluster_name!r} still exist: '
+                     f'{common_utils.format_exception(e)}')
+        return
+    if not lost:
+        return
+    details = '; '.join(f'{instance_id}: {reason}'
+                        for instance_id, reason in sorted(lost.items()))
+    with ux_utils.print_exception_no_traceback():
+        raise exceptions.InstancesLostDuringSetupError(
+            f'{len(lost)} instance(s) of cluster {cluster_name!r} disappeared '
+            f'while it was being set up ({details}). The setup cannot '
+            'finish; relaunch the cluster.')
+
+
+@contextlib.contextmanager
+def _fail_fast_on_lost_instances(check: Callable[[], None]) -> Iterator[None]:
+    """Turns a setup error caused by a lost instance into one that says so.
+
+    A stage whose instance is gone otherwise fails with a generic command
+    error (the exec target no longer exists), which names no cause.
+    """
+    try:
+        yield
+    except exceptions.InstancesLostDuringSetupError:
+        raise
+    except Exception:  # pylint: disable=broad-except
+        check()
+        raise
 
 
 # Hooks that report where a provider actually placed a cluster's instances,
@@ -703,10 +783,15 @@ def _post_provision_setup(
         if msi is not None:
             docker_config['azure_managed_identity'] = msi
 
+    def raise_if_instances_lost() -> None:
+        _raise_if_instances_lost(cloud_name, cluster_name, provider_config,
+                                 list(cluster_info.instances))
+
     with rich_utils.safe_status(
             ux_utils.spinner_message('Launching - Waiting for SSH access',
                                      provision_logging.config.log_path,
-                                     cluster_name=str(cluster_name))) as status:
+                                     cluster_name=str(cluster_name))
+    ) as status, _fail_fast_on_lost_instances(raise_if_instances_lost):
         # If on Kubernetes, skip SSH check since the pods are guaranteed to be
         # ready by the provisioner, and we use kubectl instead of SSH to run the
         # commands and rsync on the pods. SSH will still be ready after a while
@@ -856,29 +941,38 @@ def _post_provision_setup(
                 timeout: float) -> Tuple[int, bool, bool]:
             """Blocks until every node has joined Ray, or until `timeout`.
 
-            The wait runs on the head as one remote call, so readiness is
-            seen within a poll interval rather than a whole probe round
-            trip. A call that drops before the wait finishes (no done
-            marker) is retried for the time left, so a flaky `kubectl exec`
-            does not fall through to restarting Ray on every node.
+            The wait runs on the head, so readiness is seen within a poll
+            interval rather than a whole probe round trip. It runs in calls
+            of at most _RAY_WAIT_CHUNK_SECONDS, and the instances are checked
+            between calls: a pod deleted mid-wait never joins, and would
+            otherwise hold the launch for the whole timeout. A call that
+            drops before its wait finishes (no done marker) is retried for
+            the time left, so a flaky `kubectl exec` does not fall through to
+            restarting Ray on every node.
+
+            Raises:
+                exceptions.InstancesLostDuringSetupError: an instance is gone.
             """
             deadline = time.time() + timeout
             while True:
                 remaining = max(deadline - time.time(), 0.0)
+                chunk = min(remaining, _RAY_WAIT_CHUNK_SECONDS)
                 returncode, stdout, stderr = head_runner.run(
                     instance_setup.ray_wait_for_alive_nodes_command(
-                        cluster_info.num_instances, remaining),
+                        cluster_info.num_instances, chunk),
                     stream_logs=False,
                     require_outputs=True,
                     separate_stderr=True,
-                    timeout=int(remaining) + _RAY_WAIT_CALL_SLACK_SECONDS)
-                if (instance_setup.RAY_WAIT_DONE_MARKER in stdout or
-                        time.time() >= deadline):
-                    break
-                logger.debug('Ray wait on the head ended early (exit code '
-                             f'{returncode}); retrying. stderr: {stderr}')
-                time.sleep(1)
-            return parse_ray_probe(returncode, stdout)
+                    timeout=int(chunk) + _RAY_WAIT_CALL_SLACK_SECONDS)
+                probe = parse_ray_probe(returncode, stdout)
+                finished = instance_setup.RAY_WAIT_DONE_MARKER in stdout
+                if (finished and probe[1]) or time.time() >= deadline:
+                    return probe
+                raise_if_instances_lost()
+                if not finished:
+                    logger.debug('Ray wait on the head ended early (exit code '
+                                 f'{returncode}); retrying. stderr: {stderr}')
+                    time.sleep(1)
 
         status.update(
             runtime_preparation_str.format(step=3, step_name='runtime'))

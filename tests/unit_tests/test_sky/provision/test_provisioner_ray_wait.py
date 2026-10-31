@@ -20,11 +20,13 @@ from unittest import mock
 import pytest
 
 from sky import clouds
+from sky import exceptions
 from sky.provision import common
 from sky.provision import instance_setup
 from sky.provision import logging as provision_logging
 from sky.provision import provisioner
 from sky.skylet import constants
+from sky.utils import command_runner
 from sky.utils import message_utils
 from sky.utils import resources_utils
 
@@ -182,8 +184,18 @@ class _Stop(Exception):
     """Stops the setup right after the skylet start."""
 
 
-def _launch(monkeypatch, head_run, start_skylet, num_nodes=2):
+def _launch(monkeypatch,
+            head_run,
+            start_skylet,
+            num_nodes=2,
+            query_instances=None,
+            ray_timeout=0.3,
+            setup_runtime=None):
     """Sets up a just-booted K8s cluster of `num_nodes` pods.
+
+    `query_instances` answers the provider's instance listing; by default
+    every pod is running. `ray_timeout` shortens the Ray wait, since the fake
+    head answers at once where the real wait blocks; None keeps the real one.
 
     Returns the mocks for starting Ray on the head and on the workers.
     """
@@ -221,8 +233,22 @@ def _launch(monkeypatch, head_run, start_skylet, num_nodes=2):
                         lambda *_: contextlib.nullcontext(mock.Mock()))
     monkeypatch.setattr(provisioner.logs, 'get_logging_agent',
                         mock.Mock(return_value=None))
-    for name in ('internal_file_mounts', 'setup_runtime_on_cluster'):
-        monkeypatch.setattr(provisioner.instance_setup, name, mock.Mock())
+    monkeypatch.setattr(provisioner.instance_setup, 'internal_file_mounts',
+                        mock.Mock())
+    monkeypatch.setattr(provisioner.instance_setup, 'setup_runtime_on_cluster',
+                        setup_runtime or mock.Mock())
+    if query_instances is None:
+        query_instances = mock.Mock(
+            return_value={
+                name: (provisioner.status_lib.ClusterStatus.UP, None)
+                for name in instances
+            })
+    monkeypatch.setattr(provisioner.provision, 'query_instances',
+                        query_instances)
+    monkeypatch.setattr(provisioner, '_LOST_INSTANCE_CONFIRM_SECONDS', 0)
+    if ray_timeout is not None:
+        monkeypatch.setattr(provisioner, '_K8S_RAY_READY_TIMEOUT_SECONDS',
+                            ray_timeout)
     start_head = mock.Mock()
     start_workers = mock.Mock()
     monkeypatch.setattr(provisioner.instance_setup, 'start_ray_on_head_node',
@@ -252,13 +278,22 @@ def test_a_ready_cluster_is_waited_for_once_and_left_alone(monkeypatch):
         return 0, _wait_output(2, 2), ''
 
     start_skylet = mock.Mock()
-    start_head, start_workers = _launch(monkeypatch, head_run, start_skylet)
-    # One blocking call, not a poll loop.
+    query_instances = mock.Mock()
+    start_head, start_workers = _launch(monkeypatch,
+                                        head_run,
+                                        start_skylet,
+                                        query_instances=query_instances,
+                                        ray_timeout=None)
+    # One blocking call, not a poll loop, and no instance check.
     assert len(calls) == 1
+    query_instances.assert_not_called()
     cmd, kwargs = calls[0]
     assert cmd.startswith(constants.SKY_PYTHON_CMD)
-    assert shlex.split(cmd)[-6] == '2'
-    assert kwargs['timeout'] > provisioner._K8S_RAY_READY_TIMEOUT_SECONDS
+    words = shlex.split(cmd)
+    assert words[-6] == '2'
+    # The call waits for at most one chunk, and gets slack beyond it.
+    assert float(words[-5]) == provisioner._RAY_WAIT_CHUNK_SECONDS
+    assert kwargs['timeout'] > provisioner._RAY_WAIT_CHUNK_SECONDS
     start_head.assert_not_called()
     start_workers.assert_not_called()
     start_skylet.assert_called_once()
@@ -343,3 +378,160 @@ def test_a_skylet_failure_still_fails_the_launch(monkeypatch):
 
     with pytest.raises(_Stop):
         _launch(monkeypatch, head_run, mock.Mock(side_effect=_Stop))
+
+
+# --- A pod deleted during setup fails the launch fast. ---
+
+
+def _pods(*names):
+    return {
+        name: (provisioner.status_lib.ClusterStatus.UP, None) for name in names
+    }
+
+
+def test_a_worker_deleted_mid_wait_fails_at_the_next_chunk(monkeypatch):
+    """A deleted worker never joins; the launch must not wait out the
+    timeout, nor try to restart Ray on a pod that is gone."""
+    calls = []
+
+    def head_run(*_, **__):
+        calls.append(1)
+        return 0, _wait_output(1, 2), ''  # The chunk ended; 1 of 2 joined.
+
+    query_instances = mock.Mock(return_value=_pods('head'))
+    with pytest.raises(exceptions.InstancesLostDuringSetupError,
+                       match='worker1: not found'):
+        _launch(monkeypatch,
+                head_run,
+                mock.Mock(),
+                query_instances=query_instances,
+                ray_timeout=60)
+    assert len(calls) == 1
+    # Looked twice before failing: one list can miss a pod that is there.
+    assert query_instances.call_count == 2
+
+
+def test_a_deleted_head_fails_without_retrying_the_wait(monkeypatch):
+    calls = []
+
+    def head_run(*_, **__):
+        calls.append(1)
+        return 1, '', 'Error from server (NotFound): pods "head" not found'
+
+    query_instances = mock.Mock(
+        return_value={
+            'worker1': (provisioner.status_lib.ClusterStatus.UP, None),
+            'head': (None, 'deleted by kubectl')
+        })
+    monkeypatch.setattr(provisioner.time, 'sleep', lambda _: None)
+    with pytest.raises(exceptions.InstancesLostDuringSetupError,
+                       match='head: deleted by kubectl'):
+        _launch(monkeypatch,
+                head_run,
+                mock.Mock(),
+                query_instances=query_instances,
+                ray_timeout=60)
+    assert len(calls) == 1
+
+
+def test_a_pod_missing_from_one_listing_does_not_fail_the_launch(monkeypatch):
+    answers = [(0, _wait_output(1, 2), ''), (0, _wait_output(2, 2), '')]
+
+    def head_run(*_, **__):
+        return answers.pop(0)
+
+    listings = [_pods('head'), _pods('head', 'worker1')]
+    query_instances = mock.Mock(side_effect=lambda *_, **__: listings.pop(0))
+    start_head, start_workers = _launch(monkeypatch,
+                                        head_run,
+                                        mock.Mock(),
+                                        query_instances=query_instances,
+                                        ray_timeout=60)
+    assert not answers and not listings
+    start_head.assert_not_called()
+    start_workers.assert_not_called()
+
+
+def test_a_failing_instance_check_does_not_fail_the_launch(monkeypatch):
+    answers = [(0, _wait_output(1, 2), ''), (0, _wait_output(2, 2), '')]
+
+    def head_run(*_, **__):
+        return answers.pop(0)
+
+    start_head, start_workers = _launch(
+        monkeypatch,
+        head_run,
+        mock.Mock(),
+        query_instances=mock.Mock(side_effect=RuntimeError('API down')),
+        ray_timeout=60)
+    assert not answers
+    start_head.assert_not_called()
+    start_workers.assert_not_called()
+
+
+def test_a_stage_failing_on_a_deleted_pod_names_the_pod(monkeypatch):
+    stage_error = RuntimeError(
+        'Failed to run setup commands on an instance. ===== stderr ====='
+        'Error from server (NotFound): pods "worker1" not found')
+    with pytest.raises(exceptions.InstancesLostDuringSetupError,
+                       match='worker1') as e:
+        _launch(monkeypatch,
+                lambda *_, **__: (0, _wait_output(2, 2), ''),
+                mock.Mock(),
+                query_instances=mock.Mock(return_value=_pods('head')),
+                setup_runtime=mock.Mock(side_effect=stage_error))
+    # The stage's own error is kept as the cause.
+    assert e.value.__context__ is stage_error
+
+
+def test_a_stage_failing_with_every_pod_present_keeps_its_error(monkeypatch):
+    stage_error = RuntimeError('Failed to run setup commands on an instance.')
+    with pytest.raises(RuntimeError) as e:
+        _launch(monkeypatch,
+                lambda *_, **__: (0, _wait_output(2, 2), ''),
+                mock.Mock(),
+                setup_runtime=mock.Mock(side_effect=stage_error))
+    assert e.value is stage_error
+
+
+# --- A command whose pod is gone is not retried. ---
+
+
+@pytest.mark.parametrize('stderr,gone', [
+    ('Error from server (NotFound): pods "x-worker1" not found', True),
+    ('error: cannot exec into a container in a completed pod; '
+     'current phase is Failed', True),
+    ('error: unable to upgrade connection: container not found', False),
+    ('error: stream closed', False),
+    ('bash: foo: command not found', False),
+])
+def test_exec_errors_that_mean_the_pod_is_gone(stderr, gone):
+    assert command_runner.is_exec_target_gone(stderr) is gone
+
+
+def test_a_stage_is_not_retried_once_its_pod_is_gone(monkeypatch):
+    monkeypatch.setattr(instance_setup.time, 'sleep', lambda _: None)
+    calls = []
+
+    @instance_setup._auto_retry()
+    def start_ray_on_a_deleted_pod():
+        calls.append(1)
+        raise RuntimeError(
+            'Failed to start ray on the worker node (exit code 1). ===== '
+            'stderr =====Error from server (NotFound): pods "w1" not found')
+
+    with pytest.raises(RuntimeError, match='NotFound'):
+        start_ray_on_a_deleted_pod()
+    assert len(calls) == 1
+
+    answers = [RuntimeError('error: stream closed'), 'ok']
+
+    @instance_setup._auto_retry()
+    def start_ray_over_a_flaky_exec():
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    assert start_ray_over_a_flaky_exec() == 'ok'
+    assert not answers
