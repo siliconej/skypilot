@@ -73,3 +73,64 @@ class TestLruCache:
         result3 = func_to_clear(5)
         assert result3 == 5
         assert call_count == 2  # Called again after clear
+
+
+class _RecordingLock:
+    """A lock that counts how often it was taken."""
+
+    def __init__(self):
+        self.entered = 0
+
+    def __enter__(self):
+        self.entered += 1
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class TestTtlCache:
+    """Tests for ttl_cache decorator."""
+
+    def test_request_scope_is_cleared_with_request_caches(self):
+        call_count = 0
+
+        @annotations.ttl_cache(scope='request', maxsize=5, ttl=60)
+        def func(x):
+            nonlocal call_count
+            call_count += 1
+            return x
+
+        assert func(1) == 1
+        assert func(1) == 1
+        assert call_count == 1
+
+        annotations.clear_request_level_cache()
+        assert func(1) == 1
+        assert call_count == 2
+
+    def test_lock_guards_the_cache(self):
+        lock = _RecordingLock()
+
+        @annotations.ttl_cache(scope='global', maxsize=5, ttl=60, lock=lock)
+        def func(x):
+            return x
+
+        func(1)
+        assert lock.entered > 0
+        taken = lock.entered
+        func(1)
+        assert lock.entered > taken
+
+    def test_without_lock_still_caches(self):
+        call_count = 0
+
+        @annotations.ttl_cache(scope='global', maxsize=5, ttl=60)
+        def func(x):
+            nonlocal call_count
+            call_count += 1
+            return x
+
+        func(1)
+        func(1)
+        assert call_count == 1
