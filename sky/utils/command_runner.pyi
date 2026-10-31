@@ -24,6 +24,10 @@ ALIAS_SUDO_TO_EMPTY_FOR_ROOT_CMD: str
 DEFAULT_SSH_CONTROL_NAME: str
 
 
+def is_exec_target_gone(text: str) -> bool:
+    ...
+
+
 def wrap_command_as_user(argv: List[str],
                          user: str,
                          use_sudo: bool = ...) -> str:
