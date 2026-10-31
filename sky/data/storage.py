@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import typing
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
@@ -40,6 +41,7 @@ from sky.data import data_utils
 from sky.data import mounting_utils
 from sky.data import storage_utils
 from sky.skylet import constants
+from sky.utils import annotations
 from sky.utils import common_utils
 from sky.utils import rich_utils
 from sky.utils import schemas
@@ -94,6 +96,44 @@ _STORAGE_LOG_FILE_NAME = 'storage_sync.log'
 
 def get_cached_enabled_storage_cloud_names_or_refresh(
         raise_if_no_cloud_access: bool = False) -> List[str]:
+    """Returns the names of the clouds whose object storage can be used.
+
+    The answer is reused for the rest of the request (see
+    `_enabled_storage_cloud_names`).
+
+    Raises:
+        exceptions.NoCloudAccessError: if no storage cloud is enabled and
+            raise_if_no_cloud_access is set to True.
+    """
+    enabled_clouds = list(
+        _enabled_storage_cloud_names(skypilot_config.get_active_workspace(),
+                                     sky_check.current_config_fingerprint()))
+    if raise_if_no_cloud_access and not enabled_clouds:
+        raise exceptions.NoCloudAccessError(
+            'No cloud access available for storage. '
+            'Please check your cloud credentials.')
+    return enabled_clouds
+
+
+# Reused for the rest of the request. With no storage cloud enabled, the
+# cached enabled clouds are empty, so every lookup re-ran `sky check` for
+# storage (0.3-0.7 s each, several seconds when cold), and one
+# `sky jobs launch` looks three times. Keyed by workspace and config so a
+# process that serves several of them (e.g. a jobs controller, which never
+# clears request caches) keeps them apart; the TTL bounds how long such a
+# process can miss storage credentials added after its first lookup.
+@annotations.ttl_cache(scope='request',
+                       maxsize=16,
+                       ttl=60,
+                       lock=threading.Lock())
+def _enabled_storage_cloud_names(workspace: str,
+                                 config_fingerprint: str) -> Tuple[str, ...]:
+    """Names of the enabled storage clouds, for the active workspace and config.
+
+    The arguments only key the cache: the lookup itself reads the active
+    workspace and config, which they identify.
+    """
+    del workspace, config_fingerprint
     # This is a temporary solution until https://github.com/skypilot-org/skypilot/issues/1943 # pylint: disable=line-too-long
     # is resolved by implementing separate 'enabled_storage_clouds'
     enabled_clouds = sky_check.get_cached_enabled_clouds_or_refresh(
@@ -117,11 +157,7 @@ def get_cached_enabled_storage_cloud_names_or_refresh(
     if hf_is_enabled:
         enabled_clouds.append(huggingface.NAME)
 
-    if raise_if_no_cloud_access and not enabled_clouds:
-        raise exceptions.NoCloudAccessError(
-            'No cloud access available for storage. '
-            'Please check your cloud credentials.')
-    return enabled_clouds
+    return tuple(enabled_clouds)
 
 
 def _is_storage_cloud_enabled(cloud_name: str,
@@ -136,6 +172,9 @@ def _is_storage_cloud_enabled(cloud_name: str,
             quiet=True,
             clouds=[cloud_name],
             workspace=skypilot_config.get_active_workspace())
+        # The check may have just enabled the cloud: look again rather than
+        # reuse the answer from before it.
+        _enabled_storage_cloud_names.cache_clear()  # type: ignore[attr-defined]
         return _is_storage_cloud_enabled(cloud_name,
                                          try_fix_with_sky_check=False)
     return False

@@ -3,7 +3,8 @@
 import functools
 import threading
 import time
-from typing import Callable, List, Literal, TypeVar
+from typing import (Any, Callable, ContextManager, List, Literal, Optional,
+                    TypeVar)
 import weakref
 
 import cachetools
@@ -150,22 +151,31 @@ def lru_cache(scope: Literal['global', 'request'], *lru_cache_args,
     return decorator
 
 
-def ttl_cache(scope: Literal['global', 'request'], *ttl_cache_args,
+def ttl_cache(scope: Literal['global', 'request'],
+              *ttl_cache_args,
+              lock: Optional[ContextManager[Any]] = None,
               **ttl_cache_kwargs) -> Callable:
     """TTLCache decorator for functions.
 
     This decorator allows us to track which functions need to be reloaded for a
     new request using the scope argument.
+
+    Args:
+        scope: Whether the cache is global or request-specific, i.e. needs to be
+            reloaded for a new request.
+        ttl_cache_args: Arguments for cachetools.TTLCache.
+        lock: Guards the cache, for functions called from several threads.
+            cachetools caches are not thread-safe on their own.
+        ttl_cache_kwargs: Keyword arguments for cachetools.TTLCache.
     """
 
     def decorator(func: Callable[P, T]) -> Callable[P, T]:
+        cached_func = cachetools.cached(cachetools.TTLCache(
+            *ttl_cache_args, **ttl_cache_kwargs),
+                                        lock=lock)(func)
         if scope == 'global':
-            return cachetools.cached(
-                cachetools.TTLCache(*ttl_cache_args, **ttl_cache_kwargs))(func)
-        else:
-            cached_func = cachetools.cached(
-                cachetools.TTLCache(*ttl_cache_args, **ttl_cache_kwargs))(func)
-            return _register_functions_need_reload_cache(cached_func)
+            return cached_func
+        return _register_functions_need_reload_cache(cached_func)
 
     return decorator
 
