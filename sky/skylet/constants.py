@@ -496,9 +496,15 @@ SKYPILOT_WHEEL_INSTALLATION_COMMANDS = (
     'if [ "{cloud}" = "azure" ]; then '
     f'{SKY_UV_PIP_CMD} install --prerelease=allow "{dependencies.AZURE_CLI}";'
     'fi;'
-    # Install skypilot from wheel
-    f'{SKY_UV_PIP_CMD} install "$(echo ~/.sky/wheels/{{sky_wheel_hash}}/'
-    f'skypilot-{_sky_version}*.whl)[{{cloud}}, remote]" && '
+    # Install skypilot from wheel. Try offline first: the wheel is a local
+    # file, and on SkyPilot's images the runtime env already holds every
+    # dependency it needs, so nothing has to be resolved against the index
+    # (~10 ms rather than seconds). If anything is missing, offline fails
+    # before changing the env, and the online install runs as before.
+    '_sky_whl="$(echo ~/.sky/wheels/{sky_wheel_hash}/'
+    f'skypilot-{_sky_version}*.whl)[{{cloud}}, remote]"; '
+    f'{{ {SKY_UV_PIP_CMD} install --offline "$_sky_whl" > /dev/null 2>&1 || '
+    f'{SKY_UV_PIP_CMD} install "$_sky_whl"; }} && '
     'echo "{sky_wheel_hash}" > ~/.sky/wheels/current_sky_wheel_hash || '
     'exit 1; }; ')
 

@@ -1557,19 +1557,21 @@ available_node_types:
                 fi
                 ) &
                 SKY_RAY_START_PID=$!
-{% if not high_availability %}
-                # Meanwhile, warm uv's cache for the wheel's dependencies.
-                # setup_commands resolves them when it installs the wheel, and
-                # on a cold cache that takes seconds; it used to be warmed by
-                # the PyPI install removed above. --dry-run resolves without
-                # changing the environment, so it is safe next to a starting
-                # Ray. Best-effort: a failure only leaves the cache cold.
-                VIRTUAL_ENV=${SKY_RUNTIME_DIR:-$HOME}/skypilot-runtime UV_SYSTEM_PYTHON=false {{sky_unset_pythonpath_and_set_cwd}} ~/.local/bin/uv pip install --dry-run 'skypilot[kubernetes,remote]' \
-                  || echo "WARNING: could not warm the uv cache; continuing."
-{% endif %}
                 # setup_commands waits for this marker before it installs the
                 # wheel, so no two installs touch the environment at once.
                 touch /tmp/ray_skypilot_installation_complete
+{% if not high_availability %}
+                # Meanwhile, warm uv's cache for the wheel's dependencies, in
+                # case the wheel install has to resolve them online (images
+                # whose runtime env lacks them; SkyPilot's images have them, so
+                # the install succeeds offline). It runs after the marker, so a
+                # slow index never delays the wheel install, and in the
+                # background, so it never delays Ray. --dry-run only touches
+                # uv's cache, which is safe to share with a concurrent install.
+                # Best-effort: a failure only leaves the cache cold.
+                (VIRTUAL_ENV=${SKY_RUNTIME_DIR:-$HOME}/skypilot-runtime UV_SYSTEM_PYTHON=false {{sky_unset_pythonpath_and_set_cwd}} ~/.local/bin/uv pip install --dry-run 'skypilot[kubernetes,remote]' > /dev/null 2>&1 \
+                  || echo "WARNING: could not warm the uv cache; continuing.") &
+{% endif %}
                 echo "=== Ray installation completed ==="
                 wait $SKY_RAY_START_PID
                 ) > /tmp/${STEPS[1]}.log 2>&1

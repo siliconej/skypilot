@@ -621,7 +621,8 @@ def test_pod_starts_ray_before_preparing_skypilot(
     The goldens omit the pod args, so this pins what they would miss. The
     cluster's own wheel is installed by setup_commands; a PyPI copy in the pod
     args only delays `ray start` on the head, and with it every worker.
-    Instead, uv's cache is warmed with a dry run while Ray starts. HA recovery
+    Instead, uv's cache is warmed with a dry run, in the background and after
+    the marker, so it delays neither Ray nor the wheel install. HA recovery
     imports `sky` on a restarted pod before setup_commands run again, so HA
     controllers keep the install.
     """
@@ -636,12 +637,14 @@ def test_pod_starts_ray_before_preparing_skypilot(
     assert (warm_up in args) != high_availability
     # Ray is installed and patched before it starts; setup_commands may
     # install the wheel only once the marker is written, after anything that
-    # changes the environment, and the step still waits for Ray.
+    # changes the environment. The warm-up only touches uv's cache, so it
+    # follows the marker. The step still waits for Ray.
     order = [
-        'RAY_INSTALLATION_COMMANDS', 'RAY_PATCHES_CMD', 'RAY_HEAD_START_COMMAND'
+        'RAY_INSTALLATION_COMMANDS', 'RAY_PATCHES_CMD',
+        'RAY_HEAD_START_COMMAND', marker
     ]
     order += [warm_up] if not high_availability else []
-    order += [marker, 'wait $SKY_RAY_START_PID']
+    order += ['wait $SKY_RAY_START_PID']
     positions = [args.index(s) for s in order]
     assert positions == sorted(positions), order
     if high_availability:
