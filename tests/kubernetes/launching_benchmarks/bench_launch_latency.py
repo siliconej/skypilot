@@ -146,8 +146,11 @@ def compare(rows: List[Dict[str, object]], alpha: float) -> Tuple[str, bool]:
     by_variant: Dict[str, List[Dict[str, object]]] = {}
     for row in rows:
         by_variant.setdefault(str(row['variant']), []).append(row)
-    base = by_variant.get('baseline', [])
-    cand = by_variant.get('candidate', [])
+    # Metrics come from successful launches only. A failed launch's numbers
+    # may not even be its own: `sky logs --provision` can return the log of
+    # an earlier launch under the same name.
+    base = [r for r in by_variant.get('baseline', []) if r.get('ok', True)]
+    cand = [r for r in by_variant.get('candidate', []) if r.get('ok', True)]
     out = ['# Launch latency A/B: baseline vs. ej-prj-1', '']
     out.append('| Metric | Baseline median (mean ± sd, n) | '
                'Candidate median (mean ± sd, n) | Δ median | p (one-sided) |')
@@ -312,6 +315,17 @@ class Variant:
                capture_output=True,
                check=True)
         print(f'[{self.name}] API server on 127.0.0.1:{self.port}', flush=True)
+        # The state under --workdir outlives a run, so an interrupted run, or
+        # one whose teardown failed, leaves cluster records behind. A launch
+        # that reuses such a name hits the old record: if the K8s cluster was
+        # recreated since, it fails with ClusterOwnerIdentityMismatchError,
+        # and `sky logs --provision` returns the old record's log. This state
+        # belongs to the benchmark, so purge every cluster in it.
+        purge = run_in(self, [self.sky, 'down', '-a', '-y', '--purge'],
+                       capture_output=True)
+        if 'Terminat' in purge.stdout + purge.stderr:
+            print(f'[{self.name}] purged leftover clusters from an earlier run',
+                  flush=True)
 
     def stop_server(self) -> None:
         run_in(self, [self.sky, 'api', 'stop'], capture_output=True)
@@ -344,8 +358,22 @@ class Variant:
                             f'{len(ranks)}/{num_nodes}, launched='
                             f"{row['launched']}, commit={row['commit']} "
                             f'(expected {self.commit[:12]})')
-        run_in(self, [self.sky, 'down', '-y', cluster], capture_output=True)
+        self.down(cluster)
         return row
+
+    def down(self, cluster: str) -> None:
+        """Tears a cluster down; drops its record if that fails.
+
+        A record left behind breaks the next run that reuses the name.
+        """
+        if run_in(self, [self.sky, 'down', '-y', cluster],
+                  capture_output=True).returncode:
+            print(
+                f'[{self.name}] `sky down {cluster}` failed; purging its '
+                'record',
+                flush=True)
+            run_in(self, [self.sky, 'down', '-y', '--purge', cluster],
+                   capture_output=True)
 
 
 def busy_pods(context: str) -> List[str]:
@@ -393,8 +421,7 @@ def run(args: argparse.Namespace) -> int:
 
     def cleanup(*_):
         for variant, cluster in live:
-            run_in(variant, [variant.sky, 'down', '-y', cluster],
-                   capture_output=True)
+            variant.down(cluster)
         for v in variants.values():
             v.stop_server()
         if not args.keep_worktrees:
