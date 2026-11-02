@@ -13,7 +13,7 @@ Run standalone as:
 """
 import argparse
 import concurrent.futures
-import importlib
+import importlib.util
 import os
 import shlex
 import shutil
@@ -21,9 +21,9 @@ import subprocess
 import sys
 import threading
 
-# (module to import, patch file in this directory). The module is imported to
-# locate the installed file; the whole thing runs in a throwaway process
-# because an imported Ray module would otherwise stay in memory unpatched.
+# (module to patch, patch file in this directory). The whole thing runs in a
+# throwaway process because an imported Ray module would otherwise stay in
+# memory unpatched.
 _PATCHES = [
     ('ray._private.log_monitor', 'log_monitor.py.patch'),
     ('ray._private.worker', 'worker.py.patch'),
@@ -32,11 +32,26 @@ _PATCHES = [
     ('ray.autoscaler._private.resource_demand_scheduler',
      'resource_demand_scheduler.py.patch'),
     ('ray.autoscaler._private.updater', 'updater.py.patch'),
+    ('ray.scripts.scripts', 'scripts.py.patch'),
 ]
 
 
 def _to_absolute(pwd_file: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), pwd_file)
+
+
+def _installed_file(module_name: str) -> str:
+    """Locates a module's source without running it.
+
+    This is on the critical path of every Kubernetes pod bootstrap, and running
+    `ray.scripts.scripts` would import most of Ray's CLI dependencies just to
+    learn its path. Only the parent packages get imported.
+    """
+    spec = importlib.util.find_spec(module_name)
+    if spec is None or spec.origin is None:
+        raise RuntimeError(f'Cannot locate the installed source of '
+                           f'{module_name} to patch.')
+    return spec.origin
 
 
 # Serializes the per-target log writes: the pool has every patch shelling out
@@ -131,18 +146,11 @@ def apply_patches(version: str) -> None:
             used to name the .orig backups, so a later version bump does not
             reuse a backup taken from a different Ray.
     """
-    # Resolve every target before patching any of them: importing Ray
-    # submodules is the one shared-state step here, and a failure to locate a
+    # Resolve every target before patching any of them: importing Ray's parent
+    # packages is the one shared-state step here, and a failure to locate a
     # file should not leave Ray half-patched.
-    targets = []
-    for module_name, patch_file in _PATCHES:
-        module = importlib.import_module(module_name)
-        target = getattr(module, '__file__', None)
-        if target is None:
-            raise RuntimeError(
-                f'{module_name} has no __file__; cannot locate the installed '
-                'Ray source to patch.')
-        targets.append((target, _to_absolute(patch_file)))
+    targets = [(_installed_file(module_name), _to_absolute(patch_file))
+               for module_name, patch_file in _PATCHES]
 
     # Install the `patch` tooling once, not once per target -- see
     # _ensure_patch_tooling.
