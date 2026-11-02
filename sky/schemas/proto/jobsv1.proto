@@ -159,7 +159,10 @@ message GetJobSubmittedTimestampRequest {
 }
 
 message GetJobSubmittedTimestampResponse {
+  // Deprecated: a float only holds a current Unix time to the nearest 128 s.
+  // Still set for older clients. Read timestamp_double instead.
   float timestamp = 1;
+  optional double timestamp_double = 2;
 }
 
 message GetJobEndedTimestampRequest {
@@ -167,7 +170,10 @@ message GetJobEndedTimestampRequest {
 }
 
 message GetJobEndedTimestampResponse {
+  // Deprecated: a float only holds a current Unix time to the nearest 128 s.
+  // Still set for older clients. Read timestamp_double instead.
   float timestamp = 1;
+  optional double timestamp_double = 2;
 }
 
 message GetLogDirsForJobsRequest {

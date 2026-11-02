@@ -223,10 +223,12 @@ class GetJobSubmittedTimestampRequest(_message.Message):
     def __init__(self, job_id: _Optional[int] = ...) -> None: ...
 
 class GetJobSubmittedTimestampResponse(_message.Message):
-    __slots__ = ("timestamp",)
+    __slots__ = ("timestamp", "timestamp_double")
     TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
+    TIMESTAMP_DOUBLE_FIELD_NUMBER: _ClassVar[int]
     timestamp: float
-    def __init__(self, timestamp: _Optional[float] = ...) -> None: ...
+    timestamp_double: float
+    def __init__(self, timestamp: _Optional[float] = ..., timestamp_double: _Optional[float] = ...) -> None: ...
 
 class GetJobEndedTimestampRequest(_message.Message):
     __slots__ = ("job_id",)
@@ -235,10 +237,12 @@ class GetJobEndedTimestampRequest(_message.Message):
     def __init__(self, job_id: _Optional[int] = ...) -> None: ...
 
 class GetJobEndedTimestampResponse(_message.Message):
-    __slots__ = ("timestamp",)
+    __slots__ = ("timestamp", "timestamp_double")
     TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
+    TIMESTAMP_DOUBLE_FIELD_NUMBER: _ClassVar[int]
     timestamp: float
-    def __init__(self, timestamp: _Optional[float] = ...) -> None: ...
+    timestamp_double: float
+    def __init__(self, timestamp: _Optional[float] = ..., timestamp_double: _Optional[float] = ...) -> None: ...
 
 class GetLogDirsForJobsRequest(_message.Message):
     __slots__ = ("job_ids",)

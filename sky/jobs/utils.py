@@ -1224,7 +1224,11 @@ def get_job_timestamp(backend: 'backends.CloudVmRayBackend', cluster_name: str,
                     lambda: cloud_vm_ray_backend.SkyletClient(
                         handle.get_grpc_channel()).get_job_ended_timestamp(
                             end_ts_request))
-                return end_ts_response.timestamp
+                # An older skylet only sets `timestamp`, a float rounded to the
+                # nearest 128 s, so read the exact value through the code path
+                # below instead.
+                if end_ts_response.HasField('timestamp_double'):
+                    return end_ts_response.timestamp_double
             else:
                 submit_ts_request = jobsv1_pb2.GetJobSubmittedTimestampRequest(
                     job_id=job_id)
@@ -1232,7 +1236,9 @@ def get_job_timestamp(backend: 'backends.CloudVmRayBackend', cluster_name: str,
                     lambda: cloud_vm_ray_backend.SkyletClient(
                         handle.get_grpc_channel()).get_job_submitted_timestamp(
                             submit_ts_request))
-                return submit_ts_response.timestamp
+                # See the note on the ended timestamp above.
+                if submit_ts_response.HasField('timestamp_double'):
+                    return submit_ts_response.timestamp_double
         except exceptions.SkyletMethodNotImplementedError:
             pass
 
