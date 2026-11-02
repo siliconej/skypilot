@@ -1533,6 +1533,11 @@ class JobController:
         while True:
             # Get job status (skip on first iteration if forcing recovery)
             job_status = None
+            # When the job ended, if the status check that saw it end said so.
+            job_ended_at: Optional[float] = None
+            # The launch already saw the job succeed, so a status check would
+            # only repeat that.
+            succeeded_at_launch = False
             transient_job_check_error_reason = None
             # Per-node exit codes of the failed run, populated only when
             # recovery is triggered by a job failure (not an infra-level
@@ -1542,7 +1547,16 @@ class JobController:
 
             if not force_transit_to_recovering:
                 seen_at_launch = executor.pop_job_status_seen_at_launch()
-                if seen_at_launch is not None and seen_at_launch.is_terminal():
+                ended_at_launch = executor.pop_job_ended_at_seen_at_launch()
+                if (seen_at_launch == job_lib.JobStatus.SUCCEEDED and
+                        ended_at_launch is not None):
+                    logger.info(f'Task {task_id} succeeded when its launch '
+                                'returned.')
+                    job_status = job_lib.JobStatus.SUCCEEDED
+                    job_ended_at = ended_at_launch
+                    succeeded_at_launch = True
+                elif seen_at_launch is not None and seen_at_launch.is_terminal(
+                ):
                     # The launch (or recovery) that just returned already saw
                     # the job finish; there is nothing to wait for.
                     logger.info(f'Task {task_id} already finished when its '
@@ -1601,21 +1615,23 @@ class JobController:
                     runtime_recovery.reason or 'Runtime job status unavailable'
                     if job_status is None and
                     not runtime_recovery.should_relaunch else None)
-            elif not force_transit_to_recovering and runtime_error is None:
+            elif (not force_transit_to_recovering and runtime_error is None and
+                  not succeeded_at_launch):
                 # NOTE: we do not check cluster status first because race
                 # condition can occur, i.e. cluster can be down during the job
                 # status check.
                 # A failed status fetch leaves job_status=None; the checks
                 # below distinguish transient errors from recovery conditions.
                 try:
-                    job_status, transient_job_check_error_reason = (
-                        await managed_job_utils.get_job_status(
-                            self._backend,
-                            cluster_name,
-                            job_id=job_id_on_pool_cluster,
-                            status_logger=status_logger,
-                            handle=runtime_handle,
-                        ))
+                    (job_status, job_ended_at,
+                     transient_job_check_error_reason) = (
+                         await managed_job_utils.get_job_status_and_ended_at(
+                             self._backend,
+                             cluster_name,
+                             job_id=job_id_on_pool_cluster,
+                             status_logger=status_logger,
+                             handle=runtime_handle,
+                         ))
                 except exceptions.FetchClusterInfoError as fetch_e:
                     status_logger.reset()
                     logger.info(
@@ -1709,9 +1725,11 @@ class JobController:
             if job_status == job_lib.JobStatus.SUCCEEDED:
                 logger.info(f'Task {task_id} succeeded! '
                             'Getting end time and cleaning up')
-                success_end_time = await asyncio.to_thread(
-                    managed_job_utils.try_to_get_job_end_time, self._backend,
-                    cluster_name, job_id_on_pool_cluster)
+                success_end_time = job_ended_at
+                if success_end_time is None:
+                    success_end_time = await asyncio.to_thread(
+                        managed_job_utils.try_to_get_job_end_time,
+                        self._backend, cluster_name, job_id_on_pool_cluster)
 
                 # The job is done. Set the job to SUCCEEDED first before start
                 # downloading and streaming the logs to make it more responsive.
@@ -1916,9 +1934,11 @@ class JobController:
                     # The user code has probably crashed, fail immediately.
                     logger.info(
                         f'Task {task_id} failed with status: {job_status}')
-                    end_time = await asyncio.to_thread(
-                        managed_job_utils.try_to_get_job_end_time,
-                        self._backend, cluster_name, job_id_on_pool_cluster)
+                    end_time = job_ended_at
+                    if end_time is None:
+                        end_time = await asyncio.to_thread(
+                            managed_job_utils.try_to_get_job_end_time,
+                            self._backend, cluster_name, job_id_on_pool_cluster)
                     logger.info(
                         f'The user job failed ({job_status}). Please check the '
                         'logs below.\n'

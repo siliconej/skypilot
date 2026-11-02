@@ -1470,14 +1470,12 @@ class JobLibCodeGen:
         return cls._build(code)
 
     @classmethod
-    def get_job_status_and_submitted_timestamp(cls,
-                                               job_id: Optional[int] = None
-                                              ) -> str:
-        """Prints the job's statuses payload, then its submitted-at payload.
+    def get_job_status_and_timestamps(cls, job_id: Optional[int] = None) -> str:
+        """Prints the job's statuses, submitted-at and ended-at payloads.
 
         One round trip in place of get_job_status followed by
-        get_job_submitted_or_ended_timestamp_payload. It calls only the
-        functions those two call, so older cluster runtimes support it.
+        get_job_submitted_or_ended_timestamp_payload for each time. It calls
+        only the functions those call, so older cluster runtimes support it.
         """
         code = [
             f'job_id = {job_id} if {job_id} is not None '
@@ -1485,6 +1483,8 @@ class JobLibCodeGen:
             'print(job_lib.get_statuses_payload([job_id]), flush=True)',
             'print(job_lib.get_job_submitted_or_ended_timestamp_payload('
             'job_id, False), flush=True)',
+            'print(job_lib.get_job_submitted_or_ended_timestamp_payload('
+            'job_id, True), flush=True)',
         ]
         return cls._build(code)
 

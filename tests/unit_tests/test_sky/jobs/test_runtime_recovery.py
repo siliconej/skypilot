@@ -149,8 +149,8 @@ async def test_controller_observes_before_healthy_shortcut_and_refresh(
     monkeypatch.setattr(controller_module.backend_utils,
                         'async_check_network_connection', mock.AsyncMock())
     monkeypatch.setattr(
-        controller_module.managed_job_utils, 'get_job_status',
-        mock.AsyncMock(return_value=(job_lib.JobStatus.RUNNING, None)))
+        controller_module.managed_job_utils, 'get_job_status_and_ended_at',
+        mock.AsyncMock(return_value=(job_lib.JobStatus.RUNNING, None, None)))
     refresh = mock.Mock(side_effect=AssertionError('must not refresh'))
     monkeypatch.setattr(controller_module.backend_utils,
                         'refresh_cluster_status_handle', refresh)
@@ -207,8 +207,8 @@ async def test_controller_fast_terminal_does_not_repeat_user_retry(
     monkeypatch.setattr(controller_module.backend_utils,
                         'async_check_network_connection', mock.AsyncMock())
     monkeypatch.setattr(
-        controller_module.managed_job_utils, 'get_job_status',
-        mock.AsyncMock(return_value=(job_lib.JobStatus.RUNNING, None)))
+        controller_module.managed_job_utils, 'get_job_status_and_ended_at',
+        mock.AsyncMock(return_value=(job_lib.JobStatus.RUNNING, None, None)))
     monkeypatch.setattr(controller_module.managed_job_utils,
                         'try_to_get_job_end_time',
                         mock.Mock(return_value=12345))
@@ -287,8 +287,8 @@ async def test_controller_runtime_failover_cleans_allocation_and_keeps_reason(
     monkeypatch.setattr(controller_module.backend_utils,
                         'async_check_network_connection', mock.AsyncMock())
     monkeypatch.setattr(
-        controller_module.managed_job_utils, 'get_job_status',
-        mock.AsyncMock(return_value=(job_lib.JobStatus.RUNNING, None)))
+        controller_module.managed_job_utils, 'get_job_status_and_ended_at',
+        mock.AsyncMock(return_value=(job_lib.JobStatus.RUNNING, None, None)))
     refresh = mock.Mock(side_effect=AssertionError('must not refresh'))
     monkeypatch.setattr(controller_module.backend_utils,
                         'refresh_cluster_status_handle', refresh)
@@ -717,8 +717,9 @@ def _monitor_controller(monkeypatch, handle, hook):
     monkeypatch.setattr(controller_module.asyncio, 'sleep', mock.AsyncMock())
     monkeypatch.setattr(controller_module.backend_utils,
                         'async_check_network_connection', mock.AsyncMock())
-    monkeypatch.setattr(controller_module.managed_job_utils, 'get_job_status',
-                        mock.AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(controller_module.managed_job_utils,
+                        'get_job_status_and_ended_at',
+                        mock.AsyncMock(return_value=(None, None, None)))
     monkeypatch.setattr(controller_module.managed_job_utils,
                         'try_to_get_job_end_time',
                         mock.Mock(return_value=12345))

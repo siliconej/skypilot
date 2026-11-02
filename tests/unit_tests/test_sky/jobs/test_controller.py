@@ -1977,8 +1977,9 @@ class TestUserJobStatusClassification:
         with patch('asyncio.sleep', new=AsyncMock()), \
              patch('sky.backends.backend_utils.async_check_network_connection',
                    new=AsyncMock()), \
-             patch('sky.jobs.utils.get_job_status',
-                   new=AsyncMock(return_value=(worker_job_status, None))), \
+             patch('sky.jobs.utils.get_job_status_and_ended_at',
+                   new=AsyncMock(return_value=(worker_job_status, None,
+                                               None))), \
              patch('sky.jobs.utils.try_to_get_job_end_time',
                    return_value=12345.0), \
              patch('sky.backends.backend_utils.refresh_cluster_status_handle',
@@ -2113,9 +2114,9 @@ class TestUserJobFailureRecoveryEventReason:
         with patch('asyncio.sleep', new=AsyncMock()), \
              patch('sky.backends.backend_utils.async_check_network_connection',
                    new=AsyncMock()), \
-             patch('sky.jobs.utils.get_job_status',
+             patch('sky.jobs.utils.get_job_status_and_ended_at',
                    new=AsyncMock(
-                       return_value=(job_lib.JobStatus.FAILED, None))), \
+                       return_value=(job_lib.JobStatus.FAILED, None, None))), \
              patch('sky.jobs.utils.try_to_get_job_end_time',
                    return_value=12345.0), \
              patch('sky.backends.backend_utils.refresh_cluster_status_handle',
@@ -2210,9 +2211,9 @@ class TestUserJobFailureRecoveryEventReason:
         with patch('asyncio.sleep', new=AsyncMock()), \
              patch('sky.backends.backend_utils.async_check_network_connection',
                    new=AsyncMock()), \
-             patch('sky.jobs.utils.get_job_status',
-                   new=AsyncMock(return_value=(job_lib.JobStatus.CANCELLED,
-                                              None))), \
+             patch('sky.jobs.utils.get_job_status_and_ended_at',
+                   new=AsyncMock(return_value=(job_lib.JobStatus.CANCELLED, None,
+                                               None))), \
              patch('sky.backends.backend_utils.refresh_cluster_status_handle',
                    side_effect=refresh), \
              patch.object(controller_module.global_user_state,
@@ -2413,7 +2414,7 @@ class TestTransientJobStatusRecoveryWindow:
         executor = MagicMock()
         with patch.object(controller_module.time, 'time',
                           side_effect=lambda: clock['t']), \
-             patch.object(managed_job_utils, 'get_job_status',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
                           new=AsyncMock()) as ordinary_probe, \
              patch.object(controller_module.backend_utils,
                           'async_check_network_connection', new=AsyncMock()), \
@@ -2487,7 +2488,7 @@ class TestTransientJobStatusRecoveryWindow:
                 clock['t'] += next(deltas)
             except StopIteration:
                 raise TestTransientJobStatusRecoveryWindow._StopLoop()
-            return None, 'Job status check timed out after 30s.'
+            return None, None, 'Job status check timed out after 30s.'
 
         async def fake_recover(*args, **kwargs):
             nonlocal recover_calls
@@ -2513,7 +2514,7 @@ class TestTransientJobStatusRecoveryWindow:
         state = controller_module.managed_job_state
         with patch.object(controller_module.time, 'time',
                           side_effect=lambda: clock['t']), \
-             patch.object(managed_job_utils, 'get_job_status',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
                           side_effect=fake_get_job_status), \
              patch.object(controller_module.backend_utils,
                           'refresh_cluster_status_handle',
@@ -2589,7 +2590,7 @@ class TestTransientJobStatusRecoveryWindow:
             if checks >= 4:
                 raise TestTransientJobStatusRecoveryWindow._StopLoop()
             checks += 1
-            return None, 'Job status check timed out after 30s.'
+            return None, None, 'Job status check timed out after 30s.'
 
         async def fake_recover(*args, **kwargs):
             nonlocal checks_before_recovery
@@ -2617,7 +2618,7 @@ class TestTransientJobStatusRecoveryWindow:
         state = controller_module.managed_job_state
         with patch.object(controller_module.time, 'time',
                           side_effect=lambda: clock['t']), \
-             patch.object(managed_job_utils, 'get_job_status',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
                           side_effect=fake_get_job_status), \
              patch.object(controller_module.backend_utils,
                           'refresh_cluster_status_handle',
@@ -2738,7 +2739,7 @@ class TestTransientJobStatusRecoveryWindow:
             raise exceptions.ClusterStatusFetchingError('provider unreachable')
 
         async def fake_get_job_status(*args, **kwargs):
-            return probe
+            return probe[0], None, probe[1]
 
         handle = MagicMock()
         handle.launched_resources.need_cleanup_after_preemption_or_failure.\
@@ -2763,7 +2764,7 @@ class TestTransientJobStatusRecoveryWindow:
                           side_effect=lambda: clock['t']), \
              patch.object(controller_module.cloud_api_retries,
                           'with_cloud_api_retries', new=lambda fn: fn()), \
-             patch.object(managed_job_utils, 'get_job_status',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
                           side_effect=fake_get_job_status), \
              patch.object(controller_module.backend_utils,
                           'refresh_cluster_status_handle',
@@ -2850,7 +2851,7 @@ class TestRuntimeCursorReads:
             polls += 1
             if polls > 3:
                 raise self._StopLoop()
-            return job_lib.JobStatus.RUNNING, None
+            return job_lib.JobStatus.RUNNING, None, None
 
         handle = MagicMock()
         with patch.object(controller_module.backend_utils,
@@ -2866,7 +2867,7 @@ class TestRuntimeCursorReads:
                           new=AsyncMock()) as read_cursor, \
              patch.object(controller_module.managed_job_runtime,
                           'get_recovery_status') as dispatch, \
-             patch.object(managed_job_utils, 'get_job_status',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
                           new=AsyncMock(side_effect=fake_get_job_status)
                          ) as get_job_status, \
              patch.object(controller_module.asyncio, 'sleep', new=AsyncMock()):
@@ -2903,7 +2904,7 @@ class TestRuntimeCursorReads:
                                        self._StopLoop()]) as dispatch, \
              patch.object(managed_job_state, 'observe_runtime_async',
                           new=AsyncMock(return_value=cursor_b)), \
-             patch.object(managed_job_utils, 'get_job_status',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
                           new=AsyncMock()) as ordinary_probe, \
              patch.object(controller_module.asyncio, 'sleep', new=AsyncMock()):
             await self._run(self._instance())
@@ -2940,7 +2941,7 @@ class TestRuntimeCursorReads:
                                        self._StopLoop()]) as dispatch, \
              patch.object(managed_job_state, 'observe_runtime_async',
                           new=AsyncMock(side_effect=[None, cursor_b])), \
-             patch.object(managed_job_utils, 'get_job_status',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
                           new=AsyncMock()), \
              patch.object(controller_module.asyncio, 'sleep', new=AsyncMock()):
             await self._run(self._instance())
@@ -3055,7 +3056,7 @@ class TestStatusCheckGapJitter:
             if checks >= num_checks:
                 raise self._StopLoop()
             checks += 1
-            return job_lib.JobStatus.RUNNING, None
+            return job_lib.JobStatus.RUNNING, None, None
 
         async def fake_check_network_connection():
             nonlocal network_checks
@@ -3077,7 +3078,7 @@ class TestStatusCheckGapJitter:
              patch.object(controller_module, '_status_check_gap_seconds',
                           wraps=controller_module._status_check_gap_seconds
                          ) as gap_seconds, \
-             patch.object(managed_job_utils, 'get_job_status',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
                           new=AsyncMock(side_effect=fake_get_job_status)), \
              patch.object(controller_module.backend_utils,
                           'async_check_network_connection',
@@ -3095,7 +3096,10 @@ class TestStatusCheckGapJitter:
                     task=task,
                     cluster_name='cluster',
                     executor=MagicMock(
-                        **{'pop_job_status_seen_at_launch.return_value': None}),
+                        **{
+                            'pop_job_status_seen_at_launch.return_value': None,
+                            'pop_job_ended_at_seen_at_launch.return_value': None
+                        }),
                     status_logger=managed_job_utils.JobStatusLogger(),
                     callback_func=AsyncMock())
 
@@ -3137,9 +3141,12 @@ class TestFirstCheckAfterLaunch:
         instance._job_id = 1
         instance._pool = None
         executor = MagicMock(
-            **{'pop_job_status_seen_at_launch.return_value': seen_at_launch})
+            **{
+                'pop_job_status_seen_at_launch.return_value': seen_at_launch,
+                'pop_job_ended_at_seen_at_launch.return_value': None
+            })
         sleep = AsyncMock(return_value=None)
-        with patch.object(managed_job_utils, 'get_job_status',
+        with patch.object(managed_job_utils, 'get_job_status_and_ended_at',
                           new=AsyncMock(side_effect=stop)), \
              patch.object(controller_module.backend_utils,
                           'async_check_network_connection',
@@ -3174,6 +3181,86 @@ class TestFirstCheckAfterLaunch:
             sleeps = await self._sleeps_before_first_check(status)
         assert len(sleeps) == 1
         assert 0 <= sleeps[0] <= managed_job_utils.JOB_STATUS_CHECK_GAP_SECONDS
+
+    async def _end_time_and_calls(self, seen_at_launch, ended_at_launch,
+                                  check_result):
+        """Runs the loop until the task succeeds or fails.
+
+        Returns the end time it recorded, and the mocks of the status check
+        and of the separate end time fetch.
+        """
+
+        async def stop(*args, **kwargs):
+            raise self._StopLoop()
+
+        end_times = []
+
+        async def succeeded(*args, end_time, **kwargs):
+            end_times.append(end_time)
+            raise self._StopLoop()
+
+        task = MagicMock()
+        task.num_nodes = 1
+        instance = MagicMock()
+        instance._job_id = 1
+        instance._pool = None
+        executor = MagicMock(
+            **{
+                'pop_job_status_seen_at_launch.return_value': seen_at_launch,
+                'pop_job_ended_at_seen_at_launch.return_value': ended_at_launch
+            })
+        status_check = AsyncMock(return_value=check_result)
+        fetch_end_time = MagicMock(return_value=2222.0)
+        with patch.object(managed_job_utils, 'get_job_status_and_ended_at',
+                          new=status_check), \
+             patch.object(managed_job_utils, 'try_to_get_job_end_time',
+                          new=fetch_end_time), \
+             patch.object(controller_module.managed_job_state,
+                          'set_succeeded_async', new=succeeded), \
+             patch.object(controller_module.backend_utils,
+                          'async_check_network_connection',
+                          new=AsyncMock(return_value=None)), \
+             patch.object(controller_module.managed_job_runtime,
+                          'is_registered', return_value=False), \
+             patch.object(controller_module.asyncio, 'sleep',
+                          new=AsyncMock(return_value=None)):
+            with pytest.raises(self._StopLoop):
+                await JobController._monitor_one_task_impl(
+                    instance,
+                    task_id=0,
+                    task=task,
+                    cluster_name='cluster',
+                    executor=executor,
+                    status_logger=managed_job_utils.JobStatusLogger(),
+                    callback_func=AsyncMock())
+        return end_times[0], status_check, fetch_end_time
+
+    @pytest.mark.asyncio
+    async def test_success_seen_at_launch_needs_no_head_command(self):
+        end_time, status_check, fetch_end_time = await self._end_time_and_calls(
+            job_lib.JobStatus.SUCCEEDED, 1234.5, None)
+        assert end_time == 1234.5
+        status_check.assert_not_called()
+        fetch_end_time.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_success_seen_at_launch_without_a_time_is_checked(self):
+        """Over gRPC the launch does not fetch the end time."""
+        end_time, status_check, fetch_end_time = await self._end_time_and_calls(
+            job_lib.JobStatus.SUCCEEDED, None,
+            (job_lib.JobStatus.SUCCEEDED, None, None))
+        assert end_time == 2222.0
+        status_check.assert_awaited_once()
+        fetch_end_time.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_end_time_from_the_status_check_is_reused(self):
+        end_time, status_check, fetch_end_time = await self._end_time_and_calls(
+            job_lib.JobStatus.RUNNING, None,
+            (job_lib.JobStatus.SUCCEEDED, 3333.0, None))
+        assert end_time == 3333.0
+        status_check.assert_awaited_once()
+        fetch_end_time.assert_not_called()
 
 
 @pytest.fixture(autouse=True)
@@ -4771,7 +4858,7 @@ class TestRecoveryCountsInFull:
                 clock['t'] += next(deltas)
             except StopIteration:
                 raise self._StopLoop()
-            return None, 'Job status check timed out after 30s.'
+            return None, None, 'Job status check timed out after 30s.'
 
         handle = MagicMock()
         handle.launched_resources.need_cleanup_after_preemption_or_failure.\
@@ -4792,7 +4879,7 @@ class TestRecoveryCountsInFull:
         state = controller_module.managed_job_state
         with patch.object(controller_module.time, 'time',
                           side_effect=lambda: clock['t']), \
-             patch.object(managed_job_utils, 'get_job_status',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
                           side_effect=fake_get_job_status), \
              patch.object(controller_module.backend_utils,
                           'refresh_cluster_status_handle',

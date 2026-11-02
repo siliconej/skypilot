@@ -1594,10 +1594,11 @@ class TestEmergencyReattachEvent:
             calls['n'] += 1
             if calls['n'] > len(answers):
                 raise asyncio.CancelledError()
-            return answers[calls['n'] - 1]
+            status, reason = answers[calls['n'] - 1]
+            return status, None, reason
 
         monkeypatch.setattr(
-            'sky.jobs.controller.managed_job_utils.get_job_status',
+            'sky.jobs.controller.managed_job_utils.get_job_status_and_ended_at',
             _get_job_status)
         monkeypatch.setattr(
             'sky.jobs.controller.backend_utils.async_check_network_connection',
