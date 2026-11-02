@@ -1,0 +1,42 @@
+0a1,3
+> # Adapted from https://github.com/ray-project/ray/blob/ray-2.56.1/python/ray/scripts/scripts.py
+> # Registers `ray serve` lazily, so that other commands do not import Ray Serve.
+> 
+2976,2977c2979,2980
+< try:
+<     from ray.serve.scripts import cli as serve_cli_group
+---
+> class _LazyServeCli(click.Group):
+>     """Imports Serve's CLI only when `ray serve` is used.
+2979,2981c2982,3008
+<     cli.add_command(serve_cli_group, name="serve")
+< except Exception as e:
+<     logger.debug(f"Integrating ray serve command line tool failed with {e}")
+---
+>     It pulls in pandas and FastAPI, which every other `ray` command, including
+>     `ray start`, would otherwise spend seconds importing and never use.
+>     """
+> 
+>     def _serve_cli(self):
+>         try:
+>             from ray.serve.scripts import cli as serve_cli_group
+>         except Exception as e:
+>             raise click.ClickException(
+>                 f"Ray Serve's command line tool is not available: {e}"
+>             )
+>         return serve_cli_group
+> 
+>     def list_commands(self, ctx):
+>         return self._serve_cli().list_commands(ctx)
+> 
+>     def get_command(self, ctx, cmd_name):
+>         return self._serve_cli().get_command(ctx, cmd_name)
+> 
+> 
+> cli.add_command(
+>     _LazyServeCli(
+>         name="serve",
+>         help="CLI for managing Serve applications on a Ray cluster.",
+>         context_settings=dict(help_option_names=["--help", "-h"]),
+>     )
+> )

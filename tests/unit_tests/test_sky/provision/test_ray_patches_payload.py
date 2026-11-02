@@ -205,6 +205,24 @@ def test_template_uses_the_payload_command():
 # --------------------------------------------------------------- the applier
 
 
+def test_the_applier_locates_a_module_without_running_it(tmp_path, monkeypatch):
+    """Running ray.scripts.scripts would import Serve on the critical path."""
+    package = tmp_path / 'sky_fake_pkg'
+    package.mkdir()
+    (package / '__init__.py').write_text('', encoding='utf-8')
+    module = package / 'boom.py'
+    module.write_text('raise RuntimeError("the module was run")\n',
+                      encoding='utf-8')
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    assert apply_patches._installed_file('sky_fake_pkg.boom') == str(module)  # pylint: disable=protected-access
+
+
+def test_the_applier_fails_on_a_module_it_cannot_locate():
+    with pytest.raises(RuntimeError, match='Cannot locate'):
+        apply_patches._installed_file('json.sky_no_such_module')  # pylint: disable=protected-access
+
+
 def test_the_applier_patches_every_registered_file(monkeypatch):
     """All of _PATCHES, resolved before any of them is applied.
 
@@ -219,13 +237,8 @@ def test_the_applier_patches_every_registered_file(monkeypatch):
 
     monkeypatch.setattr(apply_patches, '_run_patch', _fake_run_patch)
     monkeypatch.setattr(apply_patches, '_ensure_patch_tooling', lambda: True)
-    monkeypatch.setattr(
-        apply_patches, 'importlib',
-        type(
-            '_M', (), {
-                'import_module': staticmethod(lambda name: type(
-                    '_Mod', (), {'__file__': f'/fake/{name}.py'}))
-            }))
+    monkeypatch.setattr(apply_patches, '_installed_file',
+                        lambda name: f'/fake/{name}.py')
 
     apply_patches.apply_patches('9.9.9')
 
@@ -244,13 +257,8 @@ def test_the_applier_propagates_a_failure(monkeypatch):
 
     monkeypatch.setattr(apply_patches, '_run_patch', _fake_run_patch)
     monkeypatch.setattr(apply_patches, '_ensure_patch_tooling', lambda: True)
-    monkeypatch.setattr(
-        apply_patches, 'importlib',
-        type(
-            '_M', (), {
-                'import_module': staticmethod(lambda name: type(
-                    '_Mod', (), {'__file__': f'/fake/{name}.py'}))
-            }))
+    monkeypatch.setattr(apply_patches, '_installed_file',
+                        lambda name: f'/fake/{name}.py')
 
     with pytest.raises(RuntimeError, match='boom'):
         apply_patches.apply_patches('9.9.9')
@@ -273,8 +281,8 @@ def test_the_applier_runs_the_patches_concurrently():
     with mock.patch.object(apply_patches, '_run_patch', _fake_run_patch), \
          mock.patch.object(apply_patches, '_ensure_patch_tooling',
                            lambda: True), \
-         mock.patch.object(apply_patches.importlib, 'import_module',
-                           lambda name: mock.Mock(__file__=f'/fake/{name}.py')):
+         mock.patch.object(apply_patches, '_installed_file',
+                           lambda name: f'/fake/{name}.py'):
         apply_patches.apply_patches('9.9.9')
 
 
@@ -295,8 +303,8 @@ def test_the_patch_tooling_is_installed_once_not_per_target(monkeypatch):
     monkeypatch.setattr(apply_patches, '_ensure_patch_tooling', _fake_ensure)
     monkeypatch.setattr(apply_patches, '_run_patch',
                         lambda *args, **kwargs: None)
-    monkeypatch.setattr(apply_patches.importlib, 'import_module',
-                        lambda name: mock.Mock(__file__=f'/fake/{name}.py'))
+    monkeypatch.setattr(apply_patches, '_installed_file',
+                        lambda name: f'/fake/{name}.py')
 
     apply_patches.apply_patches('9.9.9')
 
