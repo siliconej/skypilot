@@ -84,6 +84,12 @@ _QUEUE_ADMISSION_TIMEOUT_SECONDS = 24 * 60 * 60  # 24 hours
 # read timeout bounds each socket read (idle time), not the whole response,
 # so large pod lists that stream slowly are unaffected.
 _POD_POLL_REQUEST_TIMEOUT = (5, 30)
+# How long _wait_for_pods_to_run waits between polls, unless a watch of the pods
+# ends the wait sooner.
+_POD_RUN_POLL_INTERVAL_SECONDS = 1
+# The read timeout only has to catch a server that ignores the watch's own
+# timeout_seconds, so that a hung watch cannot delay the next poll for long.
+_POD_WATCH_REQUEST_TIMEOUT = (5, _POD_RUN_POLL_INTERVAL_SECONDS + 1)
 # How long a continuous streak of pod-poll transport errors may last before
 # it surfaces as an error. A transient failure (timeout, dropped connection)
 # is treated as a missed poll and retried, but a persistently unreachable API
@@ -1504,6 +1510,54 @@ def _stall_timeout_seconds(reason: Optional[str]) -> int:
     return _POD_RUN_STALL_TIMEOUT_SECONDS
 
 
+def _pod_containers_running(pod) -> bool:
+    """Whether a pod is Running with every one of its containers running."""
+    container_statuses = pod.status.container_statuses
+    return (pod.status.phase == 'Running' and container_statuses is not None and
+            all(container.state.running for container in container_statuses))
+
+
+def _wait_for_next_pod_run_poll(context: Optional[str], namespace: str,
+                                label_selector: str, pod_list: Any,
+                                waiting_pod_names: Set[str]) -> None:
+    """Waits out a poll interval, ending early if the next poll would decide.
+
+    A poll costs several API calls per pending pod, so this only ends early
+    when it would end the wait: every pod in waiting_pod_names is running, or a
+    pod is going away. The poll that follows still makes every decision.
+
+    Best-effort: if the watch fails for any reason, this is a plain sleep.
+    """
+    start = time.time()
+    remaining = set(waiting_pod_names)
+    try:
+        events = kubernetes.watch(context).stream(
+            kubernetes.core_api(context).list_namespaced_pod,
+            namespace,
+            label_selector=label_selector,
+            # Starting from the poll's own list means that no change after it
+            # can be missed.
+            resource_version=pod_list.metadata.resource_version,
+            timeout_seconds=_POD_RUN_POLL_INTERVAL_SECONDS,
+            _request_timeout=_POD_WATCH_REQUEST_TIMEOUT)
+        try:
+            for event in events:
+                pod = event['object']
+                if (event['type'] == 'DELETED' or
+                        pod.metadata.deletion_timestamp is not None or
+                        pod.status.phase == 'Failed'):
+                    return
+                if _pod_containers_running(pod):
+                    remaining.discard(pod.metadata.name)
+                if not remaining:
+                    return
+        finally:
+            events.close()
+    except Exception as e:  # pylint: disable=broad-except
+        logger.debug(f'Could not watch pods, waiting for the next poll: {e}')
+    time.sleep(max(0.0, _POD_RUN_POLL_INTERVAL_SECONDS - (time.time() - start)))
+
+
 @timeline.event
 def _wait_for_pods_to_run(namespace, context, cluster_name, new_pods):
     """Wait for pods and their containers to be ready.
@@ -1582,9 +1636,7 @@ def _wait_for_pods_to_run(namespace, context, cluster_name, new_pods):
 
         container_statuses = pod.status.container_statuses
         # Happy path: pod Running and every container Running (unchanged).
-        if (pod.status.phase == 'Running' and container_statuses is not None and
-                all(container.state.running
-                    for container in container_statuses)):
+        if _pod_containers_running(pod):
             return True, None
 
         # Tier 1: container-status sweep. Computed once, consumed in both
@@ -1741,12 +1793,14 @@ def _wait_for_pods_to_run(namespace, context, cluster_name, new_pods):
         # Get all pods in a single API call
         cluster_name_on_cloud = new_pods[0].metadata.labels[
             constants.TAG_SKYPILOT_CLUSTER_NAME]
+        label_selector = (f'{constants.TAG_SKYPILOT_CLUSTER_NAME}='
+                          f'{cluster_name_on_cloud}')
         try:
-            all_pods = kubernetes.core_api(context).list_namespaced_pod(
+            pod_list = kubernetes.core_api(context).list_namespaced_pod(
                 namespace,
-                label_selector=(f'{constants.TAG_SKYPILOT_CLUSTER_NAME}='
-                                f'{cluster_name_on_cloud}'),
-                _request_timeout=_POD_POLL_REQUEST_TIMEOUT).items
+                label_selector=label_selector,
+                _request_timeout=_POD_POLL_REQUEST_TIMEOUT)
+            all_pods = pod_list.items
             transport_error_since = None
         except (kubernetes.api_exception(),
                 kubernetes.urllib3_http_error()) as e:
@@ -1883,7 +1937,12 @@ def _wait_for_pods_to_run(namespace, context, cluster_name, new_pods):
                     nop_if_duplicate=True,
                 )
             last_status_msg = new_status_msg
-        time.sleep(1)
+        _wait_for_next_pod_run_poll(
+            context, namespace, label_selector, pod_list, {
+                pod.metadata.name
+                for pod, (is_running, _) in zip(pods_to_check, pod_statuses)
+                if not is_running
+            })
 
 
 @timeline.event
