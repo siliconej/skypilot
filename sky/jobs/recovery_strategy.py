@@ -256,9 +256,9 @@ class StrategyExecutor:
     # __init__ (subclasses, tests) have it too. See
     # pop_job_status_seen_at_launch.
     _job_status_seen_at_launch: Optional[job_lib.JobStatus] = None
-    # When that job ended, if it had and the same check returned it. See
-    # pop_job_ended_at_seen_at_launch.
-    _job_ended_at_seen_at_launch: Optional[float] = None
+    # What the same check fetched about that job, if it had ended. See
+    # pop_ended_job_seen_at_launch.
+    _ended_job_seen_at_launch: Optional[managed_job_utils.EndedJob] = None
 
     def __init__(
         self,
@@ -330,14 +330,15 @@ class StrategyExecutor:
         self._job_status_seen_at_launch = None
         return status
 
-    def pop_job_ended_at_seen_at_launch(self) -> Optional[float]:
-        """When the job seen at the last launch ended, at most once.
+    def pop_ended_job_seen_at_launch(
+            self) -> Optional[managed_job_utils.EndedJob]:
+        """What the last launch's check fetched about its ended job, once.
 
-        None if it had not ended, or if the check did not return the time.
+        None if the job had not ended, or if the check did not fetch any of it.
         """
-        ended_at = self._job_ended_at_seen_at_launch
-        self._job_ended_at_seen_at_launch = None
-        return ended_at
+        ended_job = self._ended_job_seen_at_launch
+        self._ended_job_seen_at_launch = None
+        return ended_job
 
     def set_strategy_config(self, config: dict) -> None:
         """Handle strategy-specific config from the job_recovery dict.
@@ -607,7 +608,7 @@ class StrategyExecutor:
         status = None
         reason: Optional[str] = None
         self._job_status_seen_at_launch = None
-        self._job_ended_at_seen_at_launch = None
+        self._ended_job_seen_at_launch = None
         job_checking_retry_cnt = 0
         while job_checking_retry_cnt < MAX_JOB_CHECKING_RETRY:
             # Avoid the infinite loop, if any bug happens.
@@ -615,7 +616,7 @@ class StrategyExecutor:
             runtime_status = None
             handle = None
             job_submitted_at: Optional[float] = None
-            job_ended_at: Optional[float] = None
+            ended_job: Optional[managed_job_utils.EndedJob] = None
             try:
                 if managed_job_runtime.is_registered():
                     handle = await asyncio.to_thread(
@@ -662,9 +663,9 @@ class StrategyExecutor:
                 if runtime_status is not None:
                     status, transient_error_reason = runtime_status
                 else:
-                    # Fetches the job's times along with its status, saving
-                    # more commands on the head node.
-                    (status, job_submitted_at, job_ended_at,
+                    # Fetches the job's times and log directory along with
+                    # its status, saving more commands on the head node.
+                    (status, job_submitted_at, ended_job,
                      transient_error_reason) = (
                          await managed_job_utils.get_job_status_and_times(
                              self.backend,
@@ -697,7 +698,7 @@ class StrategyExecutor:
             # Check the job status until it is not in initialized status
             if status is not None and status > job_lib.JobStatus.INIT:
                 self._job_status_seen_at_launch = status
-                self._job_ended_at_seen_at_launch = job_ended_at
+                self._ended_job_seen_at_launch = ended_job
                 if managed_job_runtime.is_registered():
                     runtime_submitted_at = await asyncio.to_thread(
                         managed_job_runtime.get_job_submitted_at, handle,
@@ -721,7 +722,7 @@ class StrategyExecutor:
                     logger.info(f'Unexpected Exception: {e}\nFailed to get '
                                 'the job start timestamp. Retrying.')
                     self._job_status_seen_at_launch = None
-                    self._job_ended_at_seen_at_launch = None
+                    self._ended_job_seen_at_launch = None
                     continue
             # Wait for the job to be started
             await asyncio.sleep(

@@ -20,6 +20,7 @@ from sky.backends.cloud_vm_ray_backend import SSHTunnelInfo
 from sky.provision import common as provision_common
 from sky.skylet import constants as skylet_constants
 from sky.utils import locks
+from sky.utils import message_utils
 from sky.utils import status_lib
 
 
@@ -1047,3 +1048,41 @@ class TestProvisionExistingClusterError:
                 self._provision(status_lib.ClusterStatus.INIT, **error)
         optimize.assert_called_once()
         assert not e.value.no_failover
+
+
+class TestSyncDownLogsWithKnownLogDirs:
+    """A caller that has the log directories saves the head command."""
+
+    def _sync_down(self, grpc, job_log_dirs, tmp_path):
+        backend = cloud_vm_ray_backend.CloudVmRayBackend()
+        backend.run_on_head = MagicMock(return_value=(
+            0, message_utils.encode_payload({'1': '~/sky_logs/looked-up'}), ''))
+        runner = MagicMock()
+        handle = MagicMock(cluster_name='cluster',
+                           is_grpc_enabled_with_flag=grpc)
+        handle.get_command_runners.return_value = [runner]
+        result = backend.sync_down_logs(handle,
+                                        None,
+                                        str(tmp_path),
+                                        job_log_dirs=job_log_dirs)
+        return backend, runner, result
+
+    @pytest.mark.parametrize('grpc', [False, True])
+    def test_known_log_dirs_need_no_lookup(self, grpc, tmp_path):
+        with patch.object(cloud_vm_ray_backend.backend_utils,
+                          'invoke_skylet_with_retries') as invoke:
+            backend, runner, result = self._sync_down(grpc,
+                                                      {'1': '~/sky_logs/known'},
+                                                      tmp_path)
+        backend.run_on_head.assert_not_called()
+        invoke.assert_not_called()
+        assert runner.rsync_driver.call_args.kwargs[
+            'source'] == '~/sky_logs/known/'
+        assert result == {'1': str(tmp_path / 'cluster' / 'known')}
+
+    def test_without_them_it_looks_up(self, tmp_path):
+        backend, runner, result = self._sync_down(False, None, tmp_path)
+        backend.run_on_head.assert_called_once()
+        assert runner.rsync_driver.call_args.kwargs[
+            'source'] == '~/sky_logs/looked-up/'
+        assert result == {'1': str(tmp_path / 'cluster' / 'looked-up')}

@@ -1528,7 +1528,11 @@ class TestDownloadLogAndStreamLoggingAgentGate:
                 controller, JobController))
         return controller
 
-    def _run(self, agent_configured, reader, undelivered_reason=None):
+    def _run(self,
+             agent_configured,
+             reader,
+             undelivered_reason=None,
+             job_log_dirs=None):
         controller = self._make_controller()
         handle = MagicMock()
         with patch('sky.jobs.utils.logs.is_logging_agent_configured',
@@ -1543,8 +1547,19 @@ class TestDownloadLogAndStreamLoggingAgentGate:
             mock_runtime.is_registered.return_value = False
             mock_cutils.download_and_stream_job_log.return_value = (
                 '/tmp/run.log')
-            controller.download_log_and_stream(0, handle, None)
+            controller.download_log_and_stream(0,
+                                               handle,
+                                               None,
+                                               job_log_dirs=job_log_dirs)
             return mock_state, mock_runtime, mock_cutils
+
+    def test_passes_on_the_log_dir_it_was_given(self):
+        log_dirs = {'1': '~/sky_logs/sky-ts'}
+        _, _, mock_cutils = self._run(agent_configured=False,
+                                      reader=None,
+                                      job_log_dirs=log_dirs)
+        kwargs = mock_cutils.download_and_stream_job_log.call_args.kwargs
+        assert kwargs['job_log_dirs'] == log_dirs
 
     def test_skips_download_when_agent_and_reader_configured(self):
         # Logs are forwarded and readable back -> skip the local copy.
@@ -1977,7 +1992,7 @@ class TestUserJobStatusClassification:
         with patch('asyncio.sleep', new=AsyncMock()), \
              patch('sky.backends.backend_utils.async_check_network_connection',
                    new=AsyncMock()), \
-             patch('sky.jobs.utils.get_job_status_and_ended_at',
+             patch('sky.jobs.utils.get_job_status_and_ended_job',
                    new=AsyncMock(return_value=(worker_job_status, None,
                                                None))), \
              patch('sky.jobs.utils.try_to_get_job_end_time',
@@ -2114,7 +2129,7 @@ class TestUserJobFailureRecoveryEventReason:
         with patch('asyncio.sleep', new=AsyncMock()), \
              patch('sky.backends.backend_utils.async_check_network_connection',
                    new=AsyncMock()), \
-             patch('sky.jobs.utils.get_job_status_and_ended_at',
+             patch('sky.jobs.utils.get_job_status_and_ended_job',
                    new=AsyncMock(
                        return_value=(job_lib.JobStatus.FAILED, None, None))), \
              patch('sky.jobs.utils.try_to_get_job_end_time',
@@ -2211,7 +2226,7 @@ class TestUserJobFailureRecoveryEventReason:
         with patch('asyncio.sleep', new=AsyncMock()), \
              patch('sky.backends.backend_utils.async_check_network_connection',
                    new=AsyncMock()), \
-             patch('sky.jobs.utils.get_job_status_and_ended_at',
+             patch('sky.jobs.utils.get_job_status_and_ended_job',
                    new=AsyncMock(return_value=(job_lib.JobStatus.CANCELLED, None,
                                                None))), \
              patch('sky.backends.backend_utils.refresh_cluster_status_handle',
@@ -2414,7 +2429,7 @@ class TestTransientJobStatusRecoveryWindow:
         executor = MagicMock()
         with patch.object(controller_module.time, 'time',
                           side_effect=lambda: clock['t']), \
-             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_job',
                           new=AsyncMock()) as ordinary_probe, \
              patch.object(controller_module.backend_utils,
                           'async_check_network_connection', new=AsyncMock()), \
@@ -2514,7 +2529,7 @@ class TestTransientJobStatusRecoveryWindow:
         state = controller_module.managed_job_state
         with patch.object(controller_module.time, 'time',
                           side_effect=lambda: clock['t']), \
-             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_job',
                           side_effect=fake_get_job_status), \
              patch.object(controller_module.backend_utils,
                           'refresh_cluster_status_handle',
@@ -2618,7 +2633,7 @@ class TestTransientJobStatusRecoveryWindow:
         state = controller_module.managed_job_state
         with patch.object(controller_module.time, 'time',
                           side_effect=lambda: clock['t']), \
-             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_job',
                           side_effect=fake_get_job_status), \
              patch.object(controller_module.backend_utils,
                           'refresh_cluster_status_handle',
@@ -2764,7 +2779,7 @@ class TestTransientJobStatusRecoveryWindow:
                           side_effect=lambda: clock['t']), \
              patch.object(controller_module.cloud_api_retries,
                           'with_cloud_api_retries', new=lambda fn: fn()), \
-             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_job',
                           side_effect=fake_get_job_status), \
              patch.object(controller_module.backend_utils,
                           'refresh_cluster_status_handle',
@@ -2867,7 +2882,7 @@ class TestRuntimeCursorReads:
                           new=AsyncMock()) as read_cursor, \
              patch.object(controller_module.managed_job_runtime,
                           'get_recovery_status') as dispatch, \
-             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_job',
                           new=AsyncMock(side_effect=fake_get_job_status)
                          ) as get_job_status, \
              patch.object(controller_module.asyncio, 'sleep', new=AsyncMock()):
@@ -2904,7 +2919,7 @@ class TestRuntimeCursorReads:
                                        self._StopLoop()]) as dispatch, \
              patch.object(managed_job_state, 'observe_runtime_async',
                           new=AsyncMock(return_value=cursor_b)), \
-             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_job',
                           new=AsyncMock()) as ordinary_probe, \
              patch.object(controller_module.asyncio, 'sleep', new=AsyncMock()):
             await self._run(self._instance())
@@ -2941,7 +2956,7 @@ class TestRuntimeCursorReads:
                                        self._StopLoop()]) as dispatch, \
              patch.object(managed_job_state, 'observe_runtime_async',
                           new=AsyncMock(side_effect=[None, cursor_b])), \
-             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_job',
                           new=AsyncMock()), \
              patch.object(controller_module.asyncio, 'sleep', new=AsyncMock()):
             await self._run(self._instance())
@@ -3078,7 +3093,7 @@ class TestStatusCheckGapJitter:
              patch.object(controller_module, '_status_check_gap_seconds',
                           wraps=controller_module._status_check_gap_seconds
                          ) as gap_seconds, \
-             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_job',
                           new=AsyncMock(side_effect=fake_get_job_status)), \
              patch.object(controller_module.backend_utils,
                           'async_check_network_connection',
@@ -3098,7 +3113,7 @@ class TestStatusCheckGapJitter:
                     executor=MagicMock(
                         **{
                             'pop_job_status_seen_at_launch.return_value': None,
-                            'pop_job_ended_at_seen_at_launch.return_value': None
+                            'pop_ended_job_seen_at_launch.return_value': None
                         }),
                     status_logger=managed_job_utils.JobStatusLogger(),
                     callback_func=AsyncMock())
@@ -3143,10 +3158,10 @@ class TestFirstCheckAfterLaunch:
         executor = MagicMock(
             **{
                 'pop_job_status_seen_at_launch.return_value': seen_at_launch,
-                'pop_job_ended_at_seen_at_launch.return_value': None
+                'pop_ended_job_seen_at_launch.return_value': None
             })
         sleep = AsyncMock(return_value=None)
-        with patch.object(managed_job_utils, 'get_job_status_and_ended_at',
+        with patch.object(managed_job_utils, 'get_job_status_and_ended_job',
                           new=AsyncMock(side_effect=stop)), \
              patch.object(controller_module.backend_utils,
                           'async_check_network_connection',
@@ -3182,12 +3197,13 @@ class TestFirstCheckAfterLaunch:
         assert len(sleeps) == 1
         assert 0 <= sleeps[0] <= managed_job_utils.JOB_STATUS_CHECK_GAP_SECONDS
 
-    async def _end_time_and_calls(self, seen_at_launch, ended_at_launch,
+    async def _end_time_and_calls(self, seen_at_launch, ended_job_at_launch,
                                   check_result):
         """Runs the loop until the task succeeds or fails.
 
         Returns the end time it recorded, and the mocks of the status check
-        and of the separate end time fetch.
+        and of the separate end time fetch. The arguments of the log download
+        are in self.download_calls.
         """
 
         async def stop(*args, **kwargs):
@@ -3207,11 +3223,11 @@ class TestFirstCheckAfterLaunch:
         executor = MagicMock(
             **{
                 'pop_job_status_seen_at_launch.return_value': seen_at_launch,
-                'pop_job_ended_at_seen_at_launch.return_value': ended_at_launch
+                'pop_ended_job_seen_at_launch.return_value': ended_job_at_launch
             })
         status_check = AsyncMock(return_value=check_result)
         fetch_end_time = MagicMock(return_value=2222.0)
-        with patch.object(managed_job_utils, 'get_job_status_and_ended_at',
+        with patch.object(managed_job_utils, 'get_job_status_and_ended_job',
                           new=status_check), \
              patch.object(managed_job_utils, 'try_to_get_job_end_time',
                           new=fetch_end_time), \
@@ -3238,7 +3254,8 @@ class TestFirstCheckAfterLaunch:
     @pytest.mark.asyncio
     async def test_success_seen_at_launch_needs_no_head_command(self):
         end_time, status_check, fetch_end_time = await self._end_time_and_calls(
-            job_lib.JobStatus.SUCCEEDED, 1234.5, None)
+            job_lib.JobStatus.SUCCEEDED,
+            managed_job_utils.EndedJob(1234.5, None), None)
         assert end_time == 1234.5
         status_check.assert_not_called()
         fetch_end_time.assert_not_called()
@@ -3257,10 +3274,77 @@ class TestFirstCheckAfterLaunch:
     async def test_end_time_from_the_status_check_is_reused(self):
         end_time, status_check, fetch_end_time = await self._end_time_and_calls(
             job_lib.JobStatus.RUNNING, None,
-            (job_lib.JobStatus.SUCCEEDED, 3333.0, None))
+            (job_lib.JobStatus.SUCCEEDED,
+             managed_job_utils.EndedJob(3333.0, None), None))
         assert end_time == 3333.0
         status_check.assert_awaited_once()
         fetch_end_time.assert_not_called()
+
+    class _Downloaded(BaseException):
+        """Ends the loop at the download. A BaseException, so that the broad
+        ``except Exception`` around the download does not swallow it."""
+
+    async def _log_dirs_downloaded(self, seen_at_launch, ended_job_at_launch,
+                                   check_result):
+        """Runs the loop to the log download; returns the log dirs it got."""
+        task = MagicMock()
+        task.num_nodes = 1
+        instance = MagicMock()
+        instance._job_id = 1
+        instance._pool = None
+        instance.download_log_and_stream.side_effect = self._Downloaded()
+        executor = MagicMock(
+            **{
+                'pop_job_status_seen_at_launch.return_value': seen_at_launch,
+                'pop_ended_job_seen_at_launch.return_value': ended_job_at_launch
+            })
+        with patch.object(managed_job_utils, 'get_job_status_and_ended_job',
+                          new=AsyncMock(return_value=check_result)), \
+             patch.object(managed_job_utils, 'try_to_get_job_end_time',
+                          return_value=2222.0), \
+             patch.object(controller_module.managed_job_state,
+                          'set_succeeded_async', new=AsyncMock()), \
+             patch.object(controller_module.backend_utils, 'get_clusters',
+                          return_value=[{'handle': MagicMock()}]), \
+             patch.object(controller_module.backend_utils,
+                          'async_check_network_connection',
+                          new=AsyncMock(return_value=None)), \
+             patch.object(controller_module.managed_job_runtime,
+                          'is_registered', return_value=False), \
+             patch.object(controller_module.asyncio, 'sleep',
+                          new=AsyncMock(return_value=None)):
+            with pytest.raises(self._Downloaded):
+                await JobController._monitor_one_task_impl(
+                    instance,
+                    task_id=0,
+                    task=task,
+                    cluster_name='cluster',
+                    executor=executor,
+                    status_logger=managed_job_utils.JobStatusLogger(),
+                    callback_func=AsyncMock())
+        return instance.download_log_and_stream.call_args.args[3]
+
+    @pytest.mark.asyncio
+    async def test_log_dir_seen_at_launch_reaches_the_download(self):
+        log_dirs = {'1': '~/sky_logs/launch'}
+        assert await self._log_dirs_downloaded(
+            job_lib.JobStatus.SUCCEEDED,
+            managed_job_utils.EndedJob(1234.5, log_dirs), None) == log_dirs
+
+    @pytest.mark.asyncio
+    async def test_log_dir_from_the_status_check_reaches_the_download(self):
+        log_dirs = {'1': '~/sky_logs/check'}
+        assert await self._log_dirs_downloaded(
+            job_lib.JobStatus.RUNNING, None,
+            (job_lib.JobStatus.SUCCEEDED,
+             managed_job_utils.EndedJob(3333.0, log_dirs), None)) == log_dirs
+
+    @pytest.mark.asyncio
+    async def test_download_looks_up_a_log_dir_nobody_fetched(self):
+        """Over gRPC or with a runtime, the status check does not fetch it."""
+        assert await self._log_dirs_downloaded(
+            job_lib.JobStatus.RUNNING, None,
+            (job_lib.JobStatus.SUCCEEDED, None, None)) is None
 
 
 @pytest.fixture(autouse=True)
@@ -4879,7 +4963,7 @@ class TestRecoveryCountsInFull:
         state = controller_module.managed_job_state
         with patch.object(controller_module.time, 'time',
                           side_effect=lambda: clock['t']), \
-             patch.object(managed_job_utils, 'get_job_status_and_ended_at',
+             patch.object(managed_job_utils, 'get_job_status_and_ended_job',
                           side_effect=fake_get_job_status), \
              patch.object(controller_module.backend_utils,
                           'refresh_cluster_status_handle',

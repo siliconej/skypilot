@@ -1598,7 +1598,7 @@ class TestEmergencyReattachEvent:
             return status, None, reason
 
         monkeypatch.setattr(
-            'sky.jobs.controller.managed_job_utils.get_job_status_and_ended_at',
+            'sky.jobs.controller.managed_job_utils.get_job_status_and_ended_job',
             _get_job_status)
         monkeypatch.setattr(
             'sky.jobs.controller.backend_utils.async_check_network_connection',

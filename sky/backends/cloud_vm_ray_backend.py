@@ -5039,11 +5039,13 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         else:
             logger.info('No jobs cancelled. They may be in terminal states.')
 
-    def sync_down_logs(self,
-                       handle: CloudVmRayResourceHandle,
-                       job_ids: Optional[List[str]],
-                       local_dir: str = constants.SKY_LOGS_DIRECTORY,
-                       head_only: bool = False) -> Dict[str, str]:
+    def sync_down_logs(
+            self,
+            handle: CloudVmRayResourceHandle,
+            job_ids: Optional[List[str]],
+            local_dir: str = constants.SKY_LOGS_DIRECTORY,
+            head_only: bool = False,
+            job_log_dirs: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         """Sync down logs for the given job_ids.
 
         Args:
@@ -5051,14 +5053,19 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 ``run.log`` already aggregates every node's task output, so
                 this captures the full log without touching workers -- which
                 may be unreachable (e.g. a node died, triggering recovery).
+            job_log_dirs: The log directories on the cluster by job ID, if the
+                caller already fetched them. This saves looking them up, which
+                without gRPC is a command on the head node. job_ids is then
+                ignored.
 
         Returns:
             A dictionary mapping job_id to log path.
         """
-        job_to_dir: Dict[str, str] = {}
-        use_legacy = not handle.is_grpc_enabled_with_flag
+        job_to_dir: Dict[str, str] = dict(job_log_dirs or {})
+        use_legacy = not job_to_dir and not handle.is_grpc_enabled_with_flag
+        use_grpc = not job_to_dir and not use_legacy
 
-        if not use_legacy:
+        if use_grpc:
             try:
                 int_job_ids = []
                 if job_ids:
@@ -5070,13 +5077,13 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 response = backend_utils.invoke_skylet_with_retries(
                     lambda: SkyletClient(handle.get_grpc_channel()
                                         ).get_log_dirs_for_jobs(request))
-                job_log_dirs = response.job_log_dirs
-                if not job_log_dirs:
+                found_log_dirs = response.job_log_dirs
+                if not found_log_dirs:
                     logger.info(f'{colorama.Fore.YELLOW}'
                                 'No matching log directories found'
                                 f'{colorama.Style.RESET_ALL}')
                     return {}
-                for job_id, log_dir in job_log_dirs.items():
+                for job_id, log_dir in found_log_dirs.items():
                     # Convert to string for backwards compatibility
                     job_to_dir[str(job_id)] = log_dir
             except exceptions.SKYLET_GRPC_FALLBACK_ERRORS as e:

@@ -1317,10 +1317,10 @@ async def test_submit_wait_returns_the_timestamp_unattributed(
                                                                   None)
 
 
-def _status_fetch_returns(monkeypatch, status, submitted_at, ended_at=None):
+def _status_fetch_returns(monkeypatch, status, submitted_at, ended_job=None):
 
     async def fetch(*args, **kwargs):
-        return status, submitted_at, ended_at, None
+        return status, submitted_at, ended_job, None
 
     monkeypatch.setattr(recovery_strategy.managed_job_utils,
                         'get_job_status_and_times', fetch)
@@ -1362,36 +1362,39 @@ async def test_submit_wait_remembers_the_status_it_saw_once(
 
 
 @pytest.mark.asyncio
-async def test_submit_wait_remembers_the_end_time_it_saw_once(monkeypatch):
-    """The monitor loop gets the end time the launch saw, and only once."""
+async def test_submit_wait_remembers_the_ended_job_it_saw_once(monkeypatch):
+    """The monitor loop gets what the launch saw, and only once."""
     executor = _make_submit_wait_executor(monkeypatch)
+    ended_job = recovery_strategy.managed_job_utils.EndedJob(
+        44.0, {'1': '~/sky_logs/sky-ts'})
     _status_fetch_returns(monkeypatch,
                           recovery_strategy.job_lib.JobStatus.SUCCEEDED,
                           33.0,
-                          ended_at=44.0)
+                          ended_job=ended_job)
 
     assert await executor._wait_until_job_starts_on_cluster() == (33.0, None)
 
-    assert executor.pop_job_ended_at_seen_at_launch() == 44.0
-    assert executor.pop_job_ended_at_seen_at_launch() is None
+    assert executor.pop_ended_job_seen_at_launch() == ended_job
+    assert executor.pop_ended_job_seen_at_launch() is None
 
 
 @pytest.mark.asyncio
-async def test_submit_wait_forgets_the_end_time_of_an_earlier_launch(
+async def test_submit_wait_forgets_the_ended_job_of_an_earlier_launch(
         monkeypatch):
-    """A recovery's wait must not hand over the previous launch's end time."""
+    """A recovery's wait must not hand over what the previous launch saw."""
     executor = _make_submit_wait_executor(monkeypatch)
-    _status_fetch_returns(monkeypatch,
-                          recovery_strategy.job_lib.JobStatus.SUCCEEDED,
-                          33.0,
-                          ended_at=44.0)
+    _status_fetch_returns(
+        monkeypatch,
+        recovery_strategy.job_lib.JobStatus.SUCCEEDED,
+        33.0,
+        ended_job=recovery_strategy.managed_job_utils.EndedJob(44.0, None))
     await executor._wait_until_job_starts_on_cluster()
     _status_fetch_returns(monkeypatch, recovery_strategy.job_lib.JobStatus.INIT,
                           None)
 
     await executor._wait_until_job_starts_on_cluster()
 
-    assert executor.pop_job_ended_at_seen_at_launch() is None
+    assert executor.pop_ended_job_seen_at_launch() is None
 
 
 @pytest.mark.asyncio

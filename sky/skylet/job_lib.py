@@ -1471,11 +1471,12 @@ class JobLibCodeGen:
 
     @classmethod
     def get_job_status_and_timestamps(cls, job_id: Optional[int] = None) -> str:
-        """Prints the job's statuses, submitted-at and ended-at payloads.
+        """Prints the job's statuses, times and log directory, as payloads.
 
-        One round trip in place of get_job_status followed by
-        get_job_submitted_or_ended_timestamp_payload for each time. It calls
-        only the functions those call, so older cluster runtimes support it.
+        One round trip in place of get_job_status,
+        get_job_submitted_or_ended_timestamp_payload for each time, and
+        get_log_dirs_for_jobs. It calls only the functions those call, so older
+        cluster runtimes support it.
         """
         code = [
             f'job_id = {job_id} if {job_id} is not None '
@@ -1485,6 +1486,13 @@ class JobLibCodeGen:
             'job_id, False), flush=True)',
             'print(job_lib.get_job_submitted_or_ended_timestamp_payload('
             'job_id, True), flush=True)',
+            # A cluster with no jobs has no job_id, and no log directory.
+            # TODO(aylei): backward compatibility, as in get_log_dirs_for_jobs.
+            'print("" if job_id is None else '
+            'job_lib.get_log_dir_for_jobs([job_id]) if '
+            'hasattr(job_lib, "get_log_dir_for_jobs") else '
+            'job_lib.run_timestamp_with_globbing_payload([job_id]), '
+            'flush=True)',
         ]
         return cls._build(code)
 

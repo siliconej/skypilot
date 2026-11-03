@@ -21,7 +21,7 @@ import time
 import traceback
 import typing
 from typing import (Any, Callable, Dict, Iterable, Iterator, List, Literal,
-                    Optional, Set, TextIO, Tuple, Union)
+                    NamedTuple, Optional, Set, TextIO, Tuple, Union)
 
 import colorama
 import filelock
@@ -779,29 +779,39 @@ async def get_job_status(
         status_logger,
         handle=handle,
         runtime_checked=runtime_checked,
-        fetch_ended_at=False)
+        fetch_ended_job=False)
     return status, transient_error_reason
 
 
-async def get_job_status_and_ended_at(
+class EndedJob(NamedTuple):
+    """What a status check fetched about a job in a terminal state."""
+    # When the job ended, or None if the check did not get it. Callers fall
+    # back to try_to_get_job_end_time.
+    ended_at: Optional[float]
+    # The job's log directory on the cluster, by job ID, for sync_down_logs. Or
+    # None if the check did not get it, and sync_down_logs looks it up.
+    log_dirs: Optional[Dict[str, str]]
+
+
+async def get_job_status_and_ended_job(
     backend: 'backends.CloudVmRayBackend',
     cluster_name: str,
     job_id: Optional[int],
     status_logger: Optional[JobStatusLogger] = None,
     *,
     handle: Optional['backends.CloudVmRayResourceHandle'] = None,
-) -> Tuple[Optional['job_lib.JobStatus'], Optional[float], Optional[str]]:
-    """get_job_status, plus when the job ended if it has.
+) -> Tuple[Optional['job_lib.JobStatus'], Optional[EndedJob], Optional[str]]:
+    """get_job_status, plus when a job that ended did and where its logs are.
 
-    Once a job has ended, the controller needs both. Without gRPC each is a
-    command on the head node (a kubectl exec or an SSH round trip of a second
-    or more), so this asks for both at once.
+    Once a job has ended, the controller needs all of them. Without gRPC each
+    is a command on the head node (a kubectl exec or an SSH round trip of a
+    second or more), so this asks for them at once.
 
     Returns:
         job_status: The status of the job, as get_job_status returns it.
-        ended_at: When a job in a terminal state ended, or None if this call
-            did not fetch it (gRPC or a runtime) or the job has not ended.
-            Callers fall back to try_to_get_job_end_time.
+        ended_job: What this call fetched about a job in a terminal state, or
+            None if it did not fetch any of it (gRPC or a runtime) or the job
+            has not ended.
         transient_error_reason: As get_job_status returns it.
     """
     return await _get_job_status(backend,
@@ -810,7 +820,7 @@ async def get_job_status_and_ended_at(
                                  status_logger,
                                  handle=handle,
                                  runtime_checked=False,
-                                 fetch_ended_at=True)
+                                 fetch_ended_job=True)
 
 
 async def _get_job_status(
@@ -821,9 +831,9 @@ async def _get_job_status(
     *,
     handle: Optional['backends.CloudVmRayResourceHandle'],
     runtime_checked: bool,
-    fetch_ended_at: bool,
-) -> Tuple[Optional['job_lib.JobStatus'], Optional[float], Optional[str]]:
-    """Body of get_job_status and get_job_status_and_ended_at."""
+    fetch_ended_job: bool,
+) -> Tuple[Optional['job_lib.JobStatus'], Optional[EndedJob], Optional[str]]:
+    """Body of get_job_status and get_job_status_and_ended_job."""
     # TODO(zhwu, cooperc): Make this get job status aware of cluster status, so
     # that it can exit retry early if the cluster is down.
     # TODO(luca) make this async
@@ -857,9 +867,9 @@ async def _get_job_status(
     cluster_handle: 'backends.CloudVmRayResourceHandle' = handle
     job_ids = None if job_id is None else [job_id]
 
-    def _fetch(
-    ) -> Tuple[Optional['job_lib.JobStatus'], Optional[float], Optional[float]]:
-        if fetch_ended_at:
+    def _fetch() -> Tuple[Optional['job_lib.JobStatus'], Optional[float],
+                          Optional[EndedJob]]:
+        if fetch_ended_job:
             return _job_status_and_times_on_head(backend, cluster_handle,
                                                  job_id)
         statuses = backend.get_job_status(cluster_handle,
@@ -867,10 +877,11 @@ async def _get_job_status(
                                           stream_logs=False)
         return list(statuses.values())[0], None, None
 
-    status, _, ended_at, transient_error_reason = (await
-                                                   _fetch_job_status_on_head(
-                                                       _fetch, _log_job_status))
-    return status, ended_at, transient_error_reason
+    status, _, ended_job, transient_error_reason = (await
+                                                    _fetch_job_status_on_head(
+                                                        _fetch,
+                                                        _log_job_status))
+    return status, ended_job, transient_error_reason
 
 
 async def get_job_status_and_times(
@@ -879,9 +890,9 @@ async def get_job_status_and_times(
     job_id: Optional[int],
     *,
     handle: Optional['backends.CloudVmRayResourceHandle'] = None,
-) -> Tuple[Optional['job_lib.JobStatus'], Optional[float], Optional[float],
+) -> Tuple[Optional['job_lib.JobStatus'], Optional[float], Optional[EndedJob],
            Optional[str]]:
-    """get_job_status(runtime_checked=True), plus the job's times.
+    """get_job_status(runtime_checked=True), plus the job's times and log dir.
 
     After a launch, the controller needs the first two to know the job started
     on the cluster, and a short job can have ended by then. Without gRPC each
@@ -894,7 +905,7 @@ async def get_job_status_and_times(
             this call did not fetch it (gRPC, where the separate call is
             cheap) or the job does not exist. Callers fall back to
             get_job_timestamp.
-        ended_at: As get_job_status_and_ended_at returns it.
+        ended_job: As get_job_status_and_ended_job returns it.
         transient_error_reason: As get_job_status returns it.
     """
     if handle is None:
@@ -920,12 +931,13 @@ def _job_status_and_times_on_head(
     backend: 'backends.CloudVmRayBackend',
     handle: 'backends.CloudVmRayResourceHandle',
     job_id: Optional[int],
-) -> Tuple[Optional['job_lib.JobStatus'], Optional[float], Optional[float]]:
-    """Fetches a job's status and times, in one head command.
+) -> Tuple[Optional['job_lib.JobStatus'], Optional[float], Optional[EndedJob]]:
+    """Fetches a job's status, times and log directory, in one head command.
 
     Returns:
-        (job_status, submitted_at, ended_at). The times are None if not
-        fetched. ended_at is only set for a job in a terminal state.
+        (job_status, submitted_at, ended_job). submitted_at is None if not
+        fetched. ended_job is only set for a job in a terminal state, and is
+        None if none of it was fetched.
     """
     if handle.is_grpc_enabled_with_flag:
         # Each gRPC call is cheap, and get_job_status falls back to the head
@@ -959,33 +971,37 @@ def _job_status_and_times_on_head(
     status = list(job_lib.load_statuses_payload(payloads[0]).values())[0]
     submitted_at = (message_utils.decode_payload(payloads[1])
                     if len(payloads) > 1 else None)
+    # The status is read first, so a job that ended just after it is not
+    # terminal here, and the rest waits for the next check.
+    if status is None or not status.is_terminal():
+        return status, submitted_at, None
     ended_at = (message_utils.decode_payload(payloads[2])
                 if len(payloads) > 2 else None)
-    # The status is read first, so a job that ended just after it is not
-    # terminal here, and the end time waits for the next check.
-    if status is None or not status.is_terminal():
-        ended_at = None
-    return status, submitted_at, ended_at
+    log_dirs = (message_utils.decode_payload(payloads[3])
+                if len(payloads) > 3 else None) or None
+    if ended_at is None and log_dirs is None:
+        return status, submitted_at, None
+    return status, submitted_at, EndedJob(ended_at, log_dirs)
 
 
 async def _fetch_job_status_on_head(
     fetch: Callable[[], Tuple[Optional['job_lib.JobStatus'], Optional[float],
-                              Optional[float]]],
+                              Optional[EndedJob]]],
     log_job_status: Callable[[Optional['job_lib.JobStatus']], None],
-) -> Tuple[Optional['job_lib.JobStatus'], Optional[float], Optional[float],
+) -> Tuple[Optional['job_lib.JobStatus'], Optional[float], Optional[EndedJob],
            Optional[str]]:
     """Runs fetch, telling transient errors apart from fatal ones.
 
     Returns:
-        (job_status, submitted_at, ended_at, transient_error_reason), where
+        (job_status, submitted_at, ended_job, transient_error_reason), where
         the first three are what fetch returned, and all but the reason are
         None after a transient error.
     """
     try:
-        status, submitted_at, ended_at = await asyncio.wait_for(
+        status, submitted_at, ended_job = await asyncio.wait_for(
             asyncio.to_thread(fetch), timeout=_JOB_STATUS_FETCH_TIMEOUT_SECONDS)
         log_job_status(status)
-        return status, submitted_at, ended_at, None
+        return status, submitted_at, ended_job, None
     except (exceptions.CommandError, exceptions.CommandFailureException,
             grpc.RpcError, grpc.FutureTimeoutError, ValueError, TypeError,
             asyncio.TimeoutError) as e:

@@ -2840,24 +2840,41 @@ class TestJobStatusAndSubmittedAt:
             backend, self._handle(),
             3) == (job_lib.JobStatus.RUNNING, None, None)
 
-    def _payloads(self, status, submitted_at, ended_at):
+    def _payloads(self, status, submitted_at, ended_at, log_dirs=None):
         return '\n'.join(
             message_utils.encode_payload(payload) for payload in ({
                 '3': status
-            }, submitted_at, ended_at))
+            }, submitted_at, ended_at, log_dirs))
 
     def test_finished_job_returns_its_end_time(self):
         backend = self._backend(
             stdout=self._payloads('SUCCEEDED', 1234.5, 1250.5))
         assert jobs_utils._job_status_and_times_on_head(
-            backend, self._handle(),
-            3) == (job_lib.JobStatus.SUCCEEDED, 1234.5, 1250.5)
+            backend, self._handle(), 3) == (job_lib.JobStatus.SUCCEEDED, 1234.5,
+                                            jobs_utils.EndedJob(1250.5, None))
         backend.run_on_head.assert_called_once()
+
+    def test_finished_job_returns_its_log_dir(self):
+        log_dirs = {'3': '~/sky_logs/sky-ts'}
+        backend = self._backend(
+            stdout=self._payloads('SUCCEEDED', 1234.5, 1250.5, log_dirs))
+        assert jobs_utils._job_status_and_times_on_head(
+            backend, self._handle(),
+            3) == (job_lib.JobStatus.SUCCEEDED, 1234.5,
+                   jobs_utils.EndedJob(1250.5, log_dirs))
+
+    def test_no_log_dir_found_is_none(self):
+        """sync_down_logs then looks it up, and reports what it finds."""
+        backend = self._backend(
+            stdout=self._payloads('SUCCEEDED', 1234.5, 1250.5, {}))
+        assert jobs_utils._job_status_and_times_on_head(
+            backend, self._handle(), 3) == (job_lib.JobStatus.SUCCEEDED, 1234.5,
+                                            jobs_utils.EndedJob(1250.5, None))
 
     def test_end_time_of_a_job_not_yet_seen_finished_is_dropped(self):
         """The job ended after its status was read: the next check gets it."""
-        backend = self._backend(
-            stdout=self._payloads('RUNNING', 1234.5, 1250.5))
+        backend = self._backend(stdout=self._payloads(
+            'RUNNING', 1234.5, 1250.5, {'3': '~/sky_logs/sky-ts'}))
         assert jobs_utils._job_status_and_times_on_head(
             backend, self._handle(),
             3) == (job_lib.JobStatus.RUNNING, 1234.5, None)
@@ -2880,10 +2897,11 @@ class TestJobStatusAndSubmittedAt:
         monkeypatch.setattr(jobs_utils.managed_job_runtime, '_runtimes', [])
         backend = self._backend(
             stdout=self._payloads('SUCCEEDED', 1234.5, 1250.5))
-        assert await jobs_utils.get_job_status_and_ended_at(
+        assert await jobs_utils.get_job_status_and_ended_job(
             backend, 'cluster', 3,
             handle=self._resource_handle()) == (job_lib.JobStatus.SUCCEEDED,
-                                                1250.5, None)
+                                                jobs_utils.EndedJob(
+                                                    1250.5, None), None)
         backend.run_on_head.assert_called_once()
         backend.get_job_status.assert_not_called()
 
@@ -2891,10 +2909,10 @@ class TestJobStatusAndSubmittedAt:
     async def test_status_and_ended_at_transient_error(self, monkeypatch):
         monkeypatch.setattr(jobs_utils.managed_job_runtime, '_runtimes', [])
         backend = self._backend(returncode=255, stderr='pod not found')
-        status, ended_at, transient = await (
-            jobs_utils.get_job_status_and_ended_at(
+        status, ended_job, transient = await (
+            jobs_utils.get_job_status_and_ended_job(
                 backend, 'cluster', 3, handle=self._resource_handle()))
-        assert (status, ended_at) == (None, None)
+        assert (status, ended_job) == (None, None)
         assert 'Returncode: 255' in transient
 
     @pytest.mark.asyncio
@@ -2905,10 +2923,22 @@ class TestJobStatusAndSubmittedAt:
         monkeypatch.setattr(jobs_utils.managed_job_runtime, 'get_job_status',
                             lambda *_: (job_lib.JobStatus.SUCCEEDED, None))
         backend = self._backend()
-        assert await jobs_utils.get_job_status_and_ended_at(
+        assert await jobs_utils.get_job_status_and_ended_job(
             backend, 'cluster', 3,
             handle=self._resource_handle()) == (job_lib.JobStatus.SUCCEEDED,
                                                 None, None)
+        backend.run_on_head.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_plain_status_check_fetches_only_the_status(
+            self, monkeypatch):
+        """get_job_status has no use for the rest, so it stays a plain check."""
+        monkeypatch.setattr(jobs_utils.managed_job_runtime, '_runtimes', [])
+        backend = self._backend()
+        backend.get_job_status.return_value = {3: job_lib.JobStatus.RUNNING}
+        assert await jobs_utils.get_job_status(
+            backend, 'cluster', 3,
+            handle=self._resource_handle()) == (job_lib.JobStatus.RUNNING, None)
         backend.run_on_head.assert_not_called()
 
     def test_grpc_fetches_only_the_status(self):
@@ -2932,12 +2962,12 @@ class TestJobStatusAndSubmittedAt:
                                 stderr='pod not found')
         backend_handle = MagicMock(spec=backends.CloudVmRayResourceHandle)
         backend_handle.is_grpc_enabled_with_flag = False
-        status, submitted_at, ended_at, transient = (
+        status, submitted_at, ended_job, transient = (
             await jobs_utils.get_job_status_and_times(backend,
                                                       'cluster',
                                                       3,
                                                       handle=backend_handle))
-        assert (status, submitted_at, ended_at) == (None, None, None)
+        assert (status, submitted_at, ended_job) == (None, None, None)
         assert reason in transient
 
     @pytest.mark.asyncio
@@ -2968,10 +2998,10 @@ class TestJobStatusAndSubmittedAt:
                                 capture_output=True,
                                 text=True).stdout
         backend = self._backend(stdout=stdout)
-        status, submitted_at, ended_at = (
+        status, submitted_at, ended_job = (
             jobs_utils._job_status_and_times_on_head(backend, self._handle(),
                                                      job_id))
-        assert ended_at is None
+        assert ended_job is None
         assert status == job_lib.JobStatus.RUNNING
         assert isinstance(submitted_at, float) and submitted_at <= before
 
@@ -2990,8 +3020,39 @@ class TestJobStatusAndSubmittedAt:
                                 check=True,
                                 capture_output=True,
                                 text=True).stdout
-        status, submitted_at, ended_at = (
+        status, submitted_at, ended_job = (
             jobs_utils._job_status_and_times_on_head(
                 self._backend(stdout=stdout), self._handle(), 1))
         assert status == job_lib.JobStatus.SUCCEEDED
-        assert isinstance(ended_at, float) and ended_at >= submitted_at
+        assert (isinstance(ended_job.ended_at, float) and
+                ended_job.ended_at >= submitted_at)
+        # What the separate lookup in sync_down_logs would have returned.
+        lookup = job_lib.JobLibCodeGen.get_log_dirs_for_jobs(['1'])
+        stdout = subprocess.run([sys.executable, '-c',
+                                 shlex.split(lookup)[-1]],
+                                env=env,
+                                check=True,
+                                capture_output=True,
+                                text=True).stdout
+        assert ended_job.log_dirs == message_utils.decode_payload(stdout)
+        assert ended_job.log_dirs['1']
+
+    def test_codegen_on_a_cluster_with_no_jobs(self, tmp_path):
+        """There is no log directory to look up, and that is not an error."""
+        code = shlex.split(
+            job_lib.JobLibCodeGen.get_job_status_and_timestamps())[-1]
+        env = dict(os.environ)
+        env[constants.SKY_RUNTIME_DIR_ENV_VAR_KEY] = str(tmp_path)
+        subprocess.run([sys.executable, '-c', 'from sky.skylet import job_lib'],
+                       env=env,
+                       check=True)
+        result = subprocess.run([sys.executable, '-c', code],
+                                env=env,
+                                capture_output=True,
+                                text=True,
+                                check=False)
+        assert result.returncode == 0, result.stderr
+        status, _, ended_job = jobs_utils._job_status_and_times_on_head(
+            self._backend(stdout=result.stdout), self._handle(), None)
+        assert status is None
+        assert ended_job is None

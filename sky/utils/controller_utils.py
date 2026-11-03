@@ -497,7 +497,8 @@ def download_and_stream_job_log(
         local_dir: str,
         job_ids: Optional[List[str]] = None,
         on_downloaded: Optional[Callable[[str], None]] = None,
-        stream_to_console: bool = True) -> Optional[str]:
+        stream_to_console: bool = True,
+        job_log_dirs: Optional[Dict[str, str]] = None) -> Optional[str]:
     """Downloads and streams the latest job log.
 
     This function is only used by jobs controller and sky serve controller.
@@ -513,6 +514,7 @@ def download_and_stream_job_log(
             (i.e. into the controller log). When False, the log is only
             synced down and its local path returned; the synced copy remains
             the source for ``sky jobs logs`` and the dashboard.
+        job_log_dirs: As in CloudVmRayBackend.sync_down_logs.
 
     If the log cannot be fetched for any reason, return None.
     """
@@ -528,7 +530,8 @@ def download_and_stream_job_log(
             # on the existing cluster, which leads to a larger job_id. Those
             # job_ids all represent the same logical managed job.
             job_ids=job_ids,
-            local_dir=local_dir)
+            local_dir=local_dir,
+            job_log_dirs=job_log_dirs)
     except Exception as e:  # pylint: disable=broad-except
         # We want to avoid crashing the controller. sync_down_logs() is pretty
         # complicated and could crash in various places (creating remote

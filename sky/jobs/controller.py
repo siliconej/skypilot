@@ -696,6 +696,7 @@ class JobController:
         task_id: Optional[int],
         handle: Optional['cloud_vm_ray_backend.CloudVmRayResourceHandle'],
         job_id_on_pool_cluster: Optional[int],
+        job_log_dirs: Optional[Dict[str, str]] = None,
     ) -> None:
         """Downloads and streams the logs of the current job with given task ID.
 
@@ -715,6 +716,9 @@ class JobController:
         A registered ``LogDeliverySource`` may report that this cluster's logs
         were not delivered; we then keep the local copy instead of skipping
         it.
+
+        ``job_log_dirs`` is the job's log directory on the cluster, by job ID,
+        if the caller already has it; otherwise it is looked up on the cluster.
         """
         in_store, undelivered_reason = managed_job_utils.logs_in_external_store(
             handle)
@@ -768,7 +772,8 @@ class JobController:
                 job_ids=[str(job_id_on_pool_cluster)]
                 if job_id_on_pool_cluster is not None else None,
                 on_downloaded=_persist_local_log_file,
-                stream_to_console=_stream_task_logs_to_controller_log())
+                stream_to_console=_stream_task_logs_to_controller_log(),
+                job_log_dirs=job_log_dirs)
         if log_file is None:
             logger.warning(
                 f'No log file was downloaded for job {self._job_id}, '
@@ -1535,6 +1540,8 @@ class JobController:
             job_status = None
             # When the job ended, if the status check that saw it end said so.
             job_ended_at: Optional[float] = None
+            # Where its logs are on the cluster, if the same check said so.
+            job_log_dirs: Optional[Dict[str, str]] = None
             # The launch already saw the job succeed, so a status check would
             # only repeat that.
             succeeded_at_launch = False
@@ -1547,13 +1554,14 @@ class JobController:
 
             if not force_transit_to_recovering:
                 seen_at_launch = executor.pop_job_status_seen_at_launch()
-                ended_at_launch = executor.pop_job_ended_at_seen_at_launch()
+                ended_job_at_launch = executor.pop_ended_job_seen_at_launch()
                 if (seen_at_launch == job_lib.JobStatus.SUCCEEDED and
-                        ended_at_launch is not None):
+                        ended_job_at_launch is not None and
+                        ended_job_at_launch.ended_at is not None):
                     logger.info(f'Task {task_id} succeeded when its launch '
                                 'returned.')
                     job_status = job_lib.JobStatus.SUCCEEDED
-                    job_ended_at = ended_at_launch
+                    job_ended_at, job_log_dirs = ended_job_at_launch
                     succeeded_at_launch = True
                 elif seen_at_launch is not None and seen_at_launch.is_terminal(
                 ):
@@ -1623,15 +1631,17 @@ class JobController:
                 # A failed status fetch leaves job_status=None; the checks
                 # below distinguish transient errors from recovery conditions.
                 try:
-                    (job_status, job_ended_at,
+                    (job_status, ended_job,
                      transient_job_check_error_reason) = (
-                         await managed_job_utils.get_job_status_and_ended_at(
+                         await managed_job_utils.get_job_status_and_ended_job(
                              self._backend,
                              cluster_name,
                              job_id=job_id_on_pool_cluster,
                              status_logger=status_logger,
                              handle=runtime_handle,
                          ))
+                    if ended_job is not None:
+                        job_ended_at, job_log_dirs = ended_job
                 except exceptions.FetchClusterInfoError as fetch_e:
                     status_logger.reset()
                     logger.info(
@@ -1757,7 +1767,8 @@ class JobController:
                         # Best effort to download and stream the logs.
                         await asyncio.to_thread(self.download_log_and_stream,
                                                 task_id, handle,
-                                                job_id_on_pool_cluster)
+                                                job_id_on_pool_cluster,
+                                                job_log_dirs)
                 except Exception as e:  # pylint: disable=broad-except
                     # We don't want to crash here, so just log and continue.
                     logger.warning(
@@ -1947,7 +1958,8 @@ class JobController:
                     try:
                         await asyncio.to_thread(self.download_log_and_stream,
                                                 task_id, handle,
-                                                job_id_on_pool_cluster)
+                                                job_id_on_pool_cluster,
+                                                job_log_dirs)
                     except Exception as e:  # pylint: disable=broad-except
                         # We don't want to crash here, so just log and continue.
                         logger.warning(
