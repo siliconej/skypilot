@@ -53,6 +53,7 @@ each launch's `provision.log`.
    | `--baseline-ref` | merge-base of candidate and `origin/master` | Build to compare against |
    | `--context` | `kind-skypilot` | Kubernetes context to launch on |
    | `--task` | (required) | Task YAML to launch |
+   | `--candidate-task` | `--task` | Task YAML for the candidate only, for example to use an image built from it. Needs the same `num_nodes` |
    | `--runs` / `--warmup` | `5` / `1` | Timed and untimed launches per build |
    | `--port` | `46601` | Baseline API server port; the candidate uses port + 1 |
    | `--workdir` | `/tmp/sky-bench-ab` | Where worktrees, venvs and server state go |
@@ -67,7 +68,7 @@ each launch's `provision.log`.
 4. Read the results in the output directory:
    - `summary.md`: the metrics table, the checks and the verdict;
    - `results.csv`: one row per launch;
-   - `meta.json`: the refs, context, task and run counts;
+   - `meta.json`: the refs, context, tasks and run counts;
    - `logs/`: each launch's CLI output and `provision.log`.
 
 5. Confirm the cleanup. These commands should show no SkyPilot pods, no

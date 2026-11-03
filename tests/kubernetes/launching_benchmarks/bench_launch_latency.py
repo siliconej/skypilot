@@ -391,7 +391,18 @@ def busy_pods(context: str) -> List[str]:
 def run(args: argparse.Namespace) -> int:
     import yaml  # pylint: disable=import-outside-toplevel
     task_path = str(pathlib.Path(args.task).resolve())
+    candidate_task_path = str(
+        pathlib.Path(args.candidate_task or args.task).resolve())
     num_nodes = int(yaml.safe_load(open(task_path)).get('num_nodes', 1))
+    candidate_num_nodes = int(
+        yaml.safe_load(open(candidate_task_path)).get('num_nodes', 1))
+    if candidate_num_nodes != num_nodes:
+        print(
+            f'--task has {num_nodes} node(s) but --candidate-task has '
+            f'{candidate_num_nodes}, so the builds would not be comparable.',
+            file=sys.stderr)
+        return 2
+    tasks = {'baseline': task_path, 'candidate': candidate_task_path}
     busy = busy_pods(args.context)
     if busy and not args.force:
         print(
@@ -449,7 +460,7 @@ def run(args: argparse.Namespace) -> int:
                 live.append((v, cluster))
                 tag = 'warmup' if i < args.warmup else f'run {i - args.warmup}'
                 print(f'[{name}] {tag}: launching {cluster} ...', flush=True)
-                row = v.launch_once(cluster, task_path, num_nodes, logs_dir)
+                row = v.launch_once(cluster, tasks[name], num_nodes, logs_dir)
                 live.remove((v, cluster))
                 row['run'] = i - args.warmup
                 print(
@@ -480,6 +491,7 @@ def run(args: argparse.Namespace) -> int:
                 'candidate_ref': args.candidate_ref,
                 'context': args.context,
                 'task': task_path,
+                'candidate_task': candidate_task_path,
                 'runs': args.runs,
                 'warmup': args.warmup,
                 'num_nodes': num_nodes
@@ -530,6 +542,11 @@ def main() -> int:
     r.add_argument('--task',
                    required=True,
                    help='Task YAML to launch, e.g. a multi-node task.')
+    r.add_argument('--candidate-task',
+                   default=None,
+                   help='Task YAML for the candidate only, e.g. one that uses '
+                   'an image built from the candidate. It needs the same '
+                   'num_nodes as --task. Default: --task.')
     r.add_argument('--runs', type=int, default=5)
     r.add_argument('--warmup',
                    type=int,
