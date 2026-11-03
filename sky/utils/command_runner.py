@@ -84,6 +84,8 @@ RSYNC_FILTER_GITIGNORE = f'--filter=\'dir-merge,- {constants.GIT_IGNORE_FILE}\''
 GIT_EXCLUDE = '.git/info/exclude'
 RSYNC_EXCLUDE_OPTION = '--exclude-from={}'
 RSYNC_NO_OWNER_NO_GROUP_OPTION = '--no-owner --no-group'
+# Read by kubernetes/rsync_helper.sh.
+_K8S_RSYNC_MKDIR_ENV_VAR = 'SKYPILOT_K8S_RSYNC_MKDIR'
 
 _HASH_MAX_LENGTH = 10
 _DEFAULT_CONNECT_TIMEOUT = 30
@@ -411,6 +413,15 @@ class SshMode(enum.Enum):
     LOGIN = 2
 
 
+def _quote_path(path: str) -> str:
+    """Quotes a remote path for a shell, keeping a leading ~ expandable."""
+    if path == '~':
+        return path
+    if path.startswith('~/'):
+        return '~/' + shlex.quote(path[2:])
+    return shlex.quote(path)
+
+
 class CommandRunner:
     """Runner for commands to be executed on the cluster."""
 
@@ -603,8 +614,19 @@ class CommandRunner:
             prefix_command: Optional[str] = None,
             get_remote_home_dir: Callable[..., str] = lambda _=None: '~',
             timeout: Optional[int] = None,
-            remote_rsync_command: Optional[str] = None) -> None:
-        """Builds the rsync command."""
+            remote_rsync_command: Optional[str] = None,
+            create_target_dir: bool = False,
+            target_dir_env_var: Optional[str] = None) -> None:
+        """Builds the rsync command.
+
+        Args:
+            create_target_dir: Create the directory that an upload goes into,
+                in the same remote command as rsync, which saves a round trip.
+            target_dir_env_var: With create_target_dir, pass the directory to
+                the rsh command in this environment variable, for an rsh
+                command that can't take a shell command in --rsync-path.
+        """
+        assert not create_target_dir or up, 'Only an upload creates a dir.'
         # Build command.
         rsync_command = []
         if prefix_command is not None:
@@ -633,9 +655,6 @@ class CommandRunner:
 
         if rsh_option is not None:
             rsync_command.append(f'-e {shlex.quote(rsh_option)}')
-        if remote_rsync_command is not None:
-            rsync_command.append(
-                f'--rsync-path={shlex.quote(remote_rsync_command)}')
         maybe_dest_prefix = ('' if node_destination is None else
                              f'{node_destination}:')
 
@@ -651,6 +670,7 @@ class CommandRunner:
         # never reach its timer at all.
         deadline = (time.monotonic() + timeout) if timeout is not None else None
 
+        env_prefix = ''
         if up:
             resolved_target = target
             if node_destination is None:
@@ -664,6 +684,19 @@ class CommandRunner:
                         get_remote_home_dir=get_remote_home_dir,
                         deadline=deadline)
                     resolved_target = target.replace('~', remote_home_dir)
+            if create_target_dir:
+                target_dir = (os.path.dirname(resolved_target)
+                              if resolved_source.is_file() else resolved_target)
+                if target_dir and target_dir_env_var is not None:
+                    env_prefix = (f'export {target_dir_env_var}='
+                                  f'{shlex.quote(target_dir)}; ')
+                elif target_dir:
+                    remote_rsync_command = (
+                        f'mkdir -p {_quote_path(target_dir)}'
+                        f' && {remote_rsync_command or "rsync"}')
+            if remote_rsync_command is not None:
+                rsync_command.append(
+                    f'--rsync-path={shlex.quote(remote_rsync_command)}')
             full_source_str = str(resolved_source)
             if resolved_source.is_dir():
                 full_source_str = os.path.join(full_source_str, '')
@@ -672,6 +705,9 @@ class CommandRunner:
                 f'{maybe_dest_prefix}{resolved_target!r}',
             ])
         else:
+            if remote_rsync_command is not None:
+                rsync_command.append(
+                    f'--rsync-path={shlex.quote(remote_rsync_command)}')
             resolved_source = source
             if node_destination is None:
                 resolved_target = str(
@@ -690,7 +726,7 @@ class CommandRunner:
                 f'{maybe_dest_prefix}{resolved_source!r}',
                 f'{resolved_target!r}',
             ])
-        command = ' '.join(rsync_command)
+        command = env_prefix + ' '.join(rsync_command)
         logger.debug(f'Running rsync command: {command}')
 
         backoff = common_utils.Backoff(initial_backoff=5, max_backoff_factor=5)
@@ -963,6 +999,50 @@ class CommandRunner:
                           stream_logs=stream_logs,
                           max_retry=max_retry,
                           timeout=timeout)
+
+    def rsync_setup_to_new_path(
+        self,
+        source: str,
+        target: str,
+        *,
+        log_path: str = os.devnull,
+        stream_logs: bool = True,
+        timeout: Optional[int] = None,
+    ) -> None:
+        """Uploads setup files like rsync_setup, creating the target's path.
+
+        This default makes two remote calls: mkdir, then rsync. Runners that
+        can do both in one call override it.
+
+        Args:
+            source: The local source path.
+            target: The target path on the cluster.
+            log_path: Redirect stdout/stderr to the log_path.
+            stream_logs: Stream logs to the stdout/stderr.
+            timeout: Optional timeout in seconds, for each of the two calls.
+
+        Raises:
+            exceptions.CommandError: mkdir or rsync failed.
+        """
+        target_dir = (os.path.dirname(target) if os.path.isfile(
+            os.path.expanduser(source)) else target)
+        mkdir_command = f'mkdir -p {_quote_path(target_dir)}'
+        rc, stdout, stderr = self.run_setup(mkdir_command,
+                                            log_path=log_path,
+                                            stream_logs=stream_logs,
+                                            require_outputs=True,
+                                            timeout=timeout)
+        subprocess_utils.handle_returncode(
+            rc,
+            mkdir_command, ('Failed to run command before rsync '
+                            f'{source} -> {target}.'),
+            stderr=stdout + stderr)
+        self.rsync_setup(source,
+                         target,
+                         up=True,
+                         log_path=log_path,
+                         stream_logs=stream_logs,
+                         timeout=timeout)
 
     @classmethod
     def make_runner_list(
@@ -1612,6 +1692,7 @@ class SSHCommandRunner(CommandRunner):
         get_remote_home_dir: Callable[..., str] = lambda _=None: '~',
         timeout: Optional[int] = None,
         remote_rsync_command: Optional[str] = None,
+        create_target_dir: bool = False,
     ) -> None:
         """Uses 'rsync' to sync 'source' to 'target'.
 
@@ -1630,6 +1711,8 @@ class SSHCommandRunner(CommandRunner):
             timeout: Optional total timeout in seconds for the rsync, including
               all retries and backoff waits. None means no timeout (default).
             remote_rsync_command: Command used to start rsync on the remote.
+            create_target_dir: Create the directory that an upload goes into,
+              in the same SSH session as rsync.
 
         Raises:
             exceptions.CommandError: rsync command failed.
@@ -1659,7 +1742,26 @@ class SSHCommandRunner(CommandRunner):
                     max_retry=max_retry,
                     get_remote_home_dir=get_remote_home_dir,
                     timeout=timeout,
-                    remote_rsync_command=remote_rsync_command)
+                    remote_rsync_command=remote_rsync_command,
+                    create_target_dir=create_target_dir)
+
+    def rsync_setup_to_new_path(
+        self,
+        source: str,
+        target: str,
+        *,
+        log_path: str = os.devnull,
+        stream_logs: bool = True,
+        timeout: Optional[int] = None,
+    ) -> None:
+        # One SSH session: `--rsync-path="mkdir -p DIR && rsync"`.
+        self.rsync(source,
+                   target,
+                   up=True,
+                   log_path=log_path,
+                   stream_logs=stream_logs,
+                   timeout=timeout,
+                   create_target_dir=True)
 
 
 class KubernetesCommandRunner(CommandRunner):
@@ -1988,6 +2090,7 @@ class KubernetesCommandRunner(CommandRunner):
         stream_logs: bool = True,
         max_retry: int = 1,
         timeout: Optional[int] = None,
+        create_target_dir: bool = False,
     ) -> None:
         """Uses 'rsync' to sync 'source' to 'target'.
 
@@ -2002,6 +2105,8 @@ class KubernetesCommandRunner(CommandRunner):
               This value should be non-negative.
             timeout: Optional total timeout in seconds for the rsync, including
               all retries and backoff waits. None means no timeout (default).
+            create_target_dir: Create the directory that an upload goes into,
+              in the same kubectl exec as rsync.
 
         Raises:
             exceptions.CommandError: rsync command failed.
@@ -2035,7 +2140,27 @@ class KubernetesCommandRunner(CommandRunner):
             # /~/xx, so we need to replace ~ with the remote home directory. We
             # only need to do this when ~ is at the beginning of the path.
             get_remote_home_dir=self.get_remote_home_dir,
-            timeout=timeout)
+            timeout=timeout,
+            create_target_dir=create_target_dir,
+            target_dir_env_var=_K8S_RSYNC_MKDIR_ENV_VAR)
+
+    def rsync_setup_to_new_path(
+        self,
+        source: str,
+        target: str,
+        *,
+        log_path: str = os.devnull,
+        stream_logs: bool = True,
+        timeout: Optional[int] = None,
+    ) -> None:
+        # One kubectl exec: rsync_helper.sh creates the directory before rsync.
+        self.rsync(source,
+                   target,
+                   up=True,
+                   log_path=log_path,
+                   stream_logs=stream_logs,
+                   timeout=timeout,
+                   create_target_dir=True)
 
 
 class LocalProcessCommandRunner(CommandRunner):
@@ -2265,6 +2390,24 @@ class SlurmLoginNodeCommandRunner(SSHCommandRunner):
                       get_remote_home_dir=self.get_remote_home_dir,
                       timeout=timeout,
                       remote_rsync_command=remote_rsync_command)
+
+    def rsync_setup_to_new_path(
+        self,
+        source: str,
+        target: str,
+        *,
+        log_path: str = os.devnull,
+        stream_logs: bool = True,
+        timeout: Optional[int] = None,
+    ) -> None:
+        # Rsync may run as another user, through srun or in a container, and
+        # mkdir has to run in the same place, so this keeps the two calls.
+        CommandRunner.rsync_setup_to_new_path(self,
+                                              source,
+                                              target,
+                                              log_path=log_path,
+                                              stream_logs=stream_logs,
+                                              timeout=timeout)
 
 
 class SlurmCommandRunner(SlurmLoginNodeCommandRunner):

@@ -212,6 +212,15 @@ class CommandRunner:
                     timeout: Optional[int] = ...) -> None:
         ...
 
+    def rsync_setup_to_new_path(self,
+                                source: str,
+                                target: str,
+                                *,
+                                log_path: str = ...,
+                                stream_logs: bool = ...,
+                                timeout: Optional[int] = ...) -> None:
+        ...
+
     def port_forward_command(
             self,
             port_forward: List[Tuple[int, int]],

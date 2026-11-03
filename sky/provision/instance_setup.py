@@ -1054,33 +1054,11 @@ def _internal_file_mounts(file_mounts: Dict,
         return
 
     for dst, src in file_mounts.items():
-        # TODO: We should use this trick to speed up file mounting:
-        # https://stackoverflow.com/questions/1636889/how-can-i-configure-rsync-to-create-target-directory-on-remote-server
-        full_src = os.path.abspath(os.path.expanduser(src))
-
-        if os.path.isfile(full_src):
-            mkdir_command = f'mkdir -p {os.path.dirname(dst)}'
-        else:
-            mkdir_command = f'mkdir -p {dst}'
-        rc, stdout, stderr = runner.run_setup(mkdir_command,
-                                              log_path=log_path,
-                                              stream_logs=False,
-                                              require_outputs=True,
-                                              timeout=_file_mount_timeout())
-        subprocess_utils.handle_returncode(
-            rc,
-            mkdir_command, ('Failed to run command before rsync '
-                            f'{src} -> {dst}.'),
-            stderr=stdout + stderr)
-
-        runner.rsync_setup(
-            source=src,
-            target=dst,
-            up=True,
-            log_path=log_path,
-            stream_logs=False,
-            timeout=_file_mount_timeout(),
-        )
+        runner.rsync_setup_to_new_path(src,
+                                       dst,
+                                       log_path=log_path,
+                                       stream_logs=False,
+                                       timeout=_file_mount_timeout())
 
 
 @common.log_function_start_end
