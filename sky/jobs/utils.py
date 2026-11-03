@@ -154,6 +154,9 @@ _STATUSES_WITH_PERSISTED_LOGS = (
 # The maximum time a followed tail that never saw its job RUNNING waits for the
 # controller to persist the job's logs, before printing what it can find.
 _PERSISTED_LOG_WAIT_TIMEOUT_SECONDS = 30
+# How often that wait checks. The controller saves the logs right after the job
+# ends, and the client can't exit until they are saved.
+_PERSISTED_LOG_POLL_SECONDS = 0.2
 
 # Content written to the jobs cancel signal file.
 _JOBS_GRACEFUL_CANCEL_SIGNAL = 'graceful'
@@ -2522,7 +2525,7 @@ def _wait_for_persisted_task_logs(job_id: int,
         if (managed_job_state.get_job_schedule_state(job_id) ==
                 managed_job_state.ManagedJobScheduleState.DONE):
             return True
-        time.sleep(1)
+        time.sleep(_PERSISTED_LOG_POLL_SECONDS)
     return True
 
 

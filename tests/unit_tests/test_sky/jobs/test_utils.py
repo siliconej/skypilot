@@ -2172,6 +2172,20 @@ class TestStreamLogsByIdJobFinishedBetweenChecks:
         assert 'already in terminal state' not in capsys.readouterr().out
         assert code == exceptions.JobExitCode.SUCCEEDED
 
+    def test_wait_for_persisted_logs_polls_quickly(self, monkeypatch):
+        # The client can't exit until the logs are saved, so each poll that
+        # just misses them delays the exit by a whole gap.
+        self._patch_job(monkeypatch,
+                        managed_job_state.ManagedJobStatus.SUCCEEDED,
+                        [None, None, '/tmp/run.log'])
+        sleeps: List[float] = []
+        monkeypatch.setattr(jobs_utils.time, 'sleep', sleeps.append)
+
+        assert jobs_utils._wait_for_persisted_task_logs(5)
+
+        assert sleeps == [jobs_utils._PERSISTED_LOG_POLL_SECONDS] * 2
+        assert jobs_utils._PERSISTED_LOG_POLL_SECONDS == 0.2
+
 
 class TestStreamLogsByIdStoreFollowAcrossTasks:
     """A tail that follows each task from the log store moves on per task."""
