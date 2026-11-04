@@ -7,21 +7,12 @@ from packaging import version
 
 import sky
 from sky.setup_files import dependencies
+from sky.skylet import launch_constants
 
-# The base directory for all SkyPilot runtime artifacts.
-# Historically, we have always used $HOME, but we couldn't
-# do that for Slurm, because $HOME typically points to a NFS
-# mounted directory, which does not work well with SQLite.
-# https://sqlite.org/faq.html#q5
-# Additionally, having the skypilot-runtime python venv be
-# on an NFS makes things very slow.
-SKY_RUNTIME_DIR = '${SKY_RUNTIME_DIR:-$HOME}'
-# Same as above but for use within python code instead of shell commands.
-# Example usage:
-# os.path.join(
-#    os.path.expanduser(os.environ.get(SKY_RUNTIME_DIR_ENV_VAR_KEY, '~')),
-#    '.sky/jobs.db')
-SKY_RUNTIME_DIR_ENV_VAR_KEY = 'SKY_RUNTIME_DIR'
+# The base directory for all SkyPilot runtime artifacts, for shell commands, and
+# the environment variable for it, for python code. See launch_constants.py.
+SKY_RUNTIME_DIR = launch_constants.SKY_RUNTIME_DIR
+SKY_RUNTIME_DIR_ENV_VAR_KEY = launch_constants.SKY_RUNTIME_DIR_ENV_VAR_KEY
 SKY_CLUSTER_NAME_ENV_VAR_KEY = 'SKY_CLUSTER_NAME'
 # We keep sky_logs and sky_workdir in $HOME, because
 # these are artifacts that users can access, and having
@@ -69,23 +60,14 @@ SKY_REMOTE_RAY_VERSION = '2.56.1'
 #
 # TODO(zhwu): Switch -C $HOME to PYTHONSAFEPATH=1, once we moved our runtime to
 # Python 3.11 for a more robust setup.
-SKY_UNSET_PYTHONPATH_AND_SET_CWD = 'env -u PYTHONPATH -C $HOME'
-# We store the absolute path of the python executable (/opt/conda/bin/python3)
-# in this file, so that any future internal commands that need to use python
-# can use this path. This is useful for the case where the user has a custom
-# conda environment as a default environment, which is not the same as the one
-# used for installing SkyPilot runtime (ray and skypilot).
-SKY_PYTHON_PATH_FILE = f'{SKY_RUNTIME_DIR}/.sky/python_path'
+SKY_UNSET_PYTHONPATH_AND_SET_CWD = (
+    launch_constants.SKY_UNSET_PYTHONPATH_AND_SET_CWD)
+# The file with the python executable's absolute path. See launch_constants.py.
+SKY_PYTHON_PATH_FILE = launch_constants.SKY_PYTHON_PATH_FILE
 SKY_RAY_PATH_FILE = f'{SKY_RUNTIME_DIR}/.sky/ray_path'
-SKY_GET_PYTHON_PATH_CMD = (
-    f'[ -s {SKY_PYTHON_PATH_FILE} ] && '
-    f'cat {SKY_PYTHON_PATH_FILE} 2> /dev/null || '
-    # POSIX builtin, present even when the `which` binary
-    # is not (e.g. minimal RHEL/Rocky images ship no which).
-    'command -v python3')
+SKY_GET_PYTHON_PATH_CMD = launch_constants.SKY_GET_PYTHON_PATH_CMD
 # Python executable, e.g., /opt/conda/bin/python3
-SKY_PYTHON_CMD = (f'{SKY_UNSET_PYTHONPATH_AND_SET_CWD} '
-                  f'$({SKY_GET_PYTHON_PATH_CMD})')
+SKY_PYTHON_CMD = launch_constants.SKY_PYTHON_CMD
 # Prefer SKY_UV_PIP_CMD, which is faster.
 # TODO(cooperc): remove remaining usage (GCP TPU setup).
 SKY_PIP_CMD = f'{SKY_PYTHON_CMD} -m pip'
@@ -169,7 +151,7 @@ DEACTIVATE_SKY_REMOTE_PYTHON_ENV = (
     'unset VIRTUAL_ENV && unset VIRTUAL_ENV_PROMPT')
 
 # Prefix for SkyPilot environment variables
-SKYPILOT_ENV_VAR_PREFIX = 'SKYPILOT_'
+SKYPILOT_ENV_VAR_PREFIX = launch_constants.SKYPILOT_ENV_VAR_PREFIX
 SKYPILOT_SERVER_ENV_VAR_PREFIX = 'SKYPILOT_SERVER_'
 
 # The name for the environment variable that stores the unique ID of the
@@ -198,21 +180,19 @@ ROOT_JOB_ID_ENV_VAR = f'{SKYPILOT_ENV_VAR_PREFIX}ROOT_JOB_ID'
 # cluster yaml is updated.
 #
 # TODO(zongheng,zhanghao): make the upgrading of skylet automatic?
-SKYLET_VERSION = '44'  # job timestamp responses carry an exact double.
+# The value is in launch_constants.py, which attempt_skylet.py reads directly.
+SKYLET_VERSION = launch_constants.SKYLET_VERSION
 # The version of the lib files that skylet/jobs use. Whenever there is an API
 # change for the job_lib or log_lib, we need to bump this version, so that the
 # user can be notified to update their SkyPilot version on the remote cluster.
 SKYLET_LIB_VERSION = 7  # Generalized lifecycle-hooks framework.
-SKYLET_VERSION_FILE = '.sky/skylet_version'
-SKYLET_LOG_FILE = '.sky/skylet.log'
-SKYLET_PID_FILE = '.sky/skylet_pid'
-SKYLET_PORT_FILE = '.sky/skylet_port'
-# The Slurm skylet keeper consumes this start spec.
-SKYLET_START_FILE = '.sky/skylet_start'
-SKYLET_GRPC_PORT = 46590
-# Set on a Kubernetes hostNetwork pod: the port the server assigned to skylet
-# (host_network_probe's 'skylet' slot) and will dial.
-SKYLET_PORT_ENV_VAR = 'SKYPILOT_SKYLET_PORT'
+SKYLET_VERSION_FILE = launch_constants.SKYLET_VERSION_FILE
+SKYLET_LOG_FILE = launch_constants.SKYLET_LOG_FILE
+SKYLET_PID_FILE = launch_constants.SKYLET_PID_FILE
+SKYLET_PORT_FILE = launch_constants.SKYLET_PORT_FILE
+SKYLET_START_FILE = launch_constants.SKYLET_START_FILE
+SKYLET_GRPC_PORT = launch_constants.SKYLET_GRPC_PORT
+SKYLET_PORT_ENV_VAR = launch_constants.SKYLET_PORT_ENV_VAR
 SKYLET_GRPC_TIMEOUT_SECONDS = 10
 # TODO(zpoint): legacy autostop-hook log path, kept so the new
 # tail_hook_logs(event='stop') can fall back to it on clusters

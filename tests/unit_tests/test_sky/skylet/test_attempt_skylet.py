@@ -1,13 +1,19 @@
 """Unit tests for attempt_skylet module."""
+import json
+import os
 import signal
 import socket
+import subprocess
+import sys
 from unittest import mock
 
 import psutil
 import pytest
 
+from sky.provision import instance_setup
 from sky.skylet import attempt_skylet
 from sky.skylet import constants
+from sky.skylet import launch_constants
 
 
 @pytest.fixture
@@ -168,7 +174,7 @@ class TestRestartSkylet:
         self._no_running_skylet(monkeypatch)
         monkeypatch.delenv(constants.SKYLET_PORT_ENV_VAR, raising=False)
         asked = []
-        monkeypatch.setattr('sky.utils.common_utils.find_free_port',
+        monkeypatch.setattr('sky.skylet.attempt_skylet._find_free_port',
                             lambda port: asked.append(port) or port + 1)
         calls = []
         monkeypatch.setattr(
@@ -194,7 +200,7 @@ class TestRestartSkylet:
         killed_pids = []
         monkeypatch.setattr('os.kill', lambda p, s: killed_pids.append((p, s)))
 
-        monkeypatch.setattr('sky.utils.common_utils.find_free_port',
+        monkeypatch.setattr('sky.skylet.attempt_skylet._find_free_port',
                             lambda port: constants.SKYLET_GRPC_PORT)
 
         subprocess_calls = []
@@ -232,7 +238,7 @@ class TestRestartSkylet:
         killed_pids = []
         monkeypatch.setattr('os.kill', lambda p, s: killed_pids.append((p, s)))
 
-        monkeypatch.setattr('sky.utils.common_utils.find_free_port',
+        monkeypatch.setattr('sky.skylet.attempt_skylet._find_free_port',
                             lambda port: constants.SKYLET_GRPC_PORT)
 
         subprocess_calls = []
@@ -288,7 +294,7 @@ class TestRestartSkyletOnSlurm:
         monkeypatch.setattr(attempt_skylet, 'START_FILE', str(self.start_file))
         monkeypatch.setattr(attempt_skylet, '_is_inside_slurm_cluster',
                             lambda: True)
-        monkeypatch.setattr('sky.utils.common_utils.find_free_port',
+        monkeypatch.setattr('sky.skylet.attempt_skylet._find_free_port',
                             lambda port: constants.SKYLET_GRPC_PORT)
 
         # The nohup path must never run on Slurm.
@@ -514,3 +520,60 @@ class TestPortIsFree:
             listener.bind(('', 0))
             listener.listen(1)
             assert not attempt_skylet._port_is_free(listener.getsockname()[1])
+
+
+class TestLauncherDoesNotImportSky:
+    """The launcher must not run sky/__init__.py, which takes seconds."""
+
+    # Runs the launcher the way MAYBE_SKYLET_RESTART_CMD does, without really
+    # starting skylet, and reports the `sky` modules it imported.
+    _CHILD = ('''
+import importlib.util as u, json, os, runpy, subprocess, sys
+class Done:
+    returncode = 0
+    stdout = ''
+calls = []
+def run(cmd, **kwargs):
+    calls.append(cmd)
+    return Done()
+subprocess.run = run
+path = os.path.join(os.path.dirname(u.find_spec('sky').origin), 'skylet',
+                    'attempt_skylet.py')
+runpy.run_path(path, run_name='__main__')
+print('RESULT' + json.dumps({
+    'sky': [m for m in sys.modules if m == 'sky' or m.startswith('sky.')],
+    'calls': calls,
+}))
+''')
+
+    def test_starts_skylet_without_importing_sky(self, tmp_path):
+        (tmp_path / '.sky').mkdir()
+        env = dict(os.environ, HOME=str(tmp_path))
+        env.pop(constants.SKY_RUNTIME_DIR_ENV_VAR_KEY, None)
+        env.pop(constants.SKYLET_PORT_ENV_VAR, None)
+        proc = subprocess.run([sys.executable, '-c', self._CHILD],
+                              env=env,
+                              cwd=tmp_path,
+                              capture_output=True,
+                              text=True,
+                              check=True)
+        line = next(
+            l for l in proc.stdout.splitlines() if l.startswith('RESULT'))
+        result = json.loads(line[len('RESULT'):])
+        assert result['sky'] == []
+        assert any('-m sky.skylet.skylet --port=' in str(call)
+                   for call in result['calls'])
+        assert (tmp_path / '.sky' /
+                'skylet_version').read_text() == (constants.SKYLET_VERSION)
+
+    def test_restart_command_runs_the_launcher_by_path(self):
+        cmd = instance_setup.MAYBE_SKYLET_RESTART_CMD
+        assert 'attempt_skylet.py' in cmd
+        assert '-m sky.skylet.attempt_skylet' not in cmd
+
+
+def test_launch_constants_match_constants():
+    """constants.py re-exports what the launcher reads, unchanged."""
+    for name in dir(launch_constants):
+        if name.isupper():
+            assert getattr(constants, name) == getattr(launch_constants, name)
