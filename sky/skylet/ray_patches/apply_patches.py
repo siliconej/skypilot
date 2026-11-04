@@ -26,6 +26,7 @@ import threading
 # memory unpatched.
 _PATCHES = [
     ('ray._private.log_monitor', 'log_monitor.py.patch'),
+    ('ray._private.utils', 'utils.py.patch'),
     ('ray._private.worker', 'worker.py.patch'),
     ('ray.autoscaler._private.autoscaler', 'autoscaler.py.patch'),
     ('ray.autoscaler._private.command_runner', 'command_runner.py.patch'),
