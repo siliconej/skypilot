@@ -56,6 +56,7 @@ logger = sky_logging.init_logger(__name__)
 
 _ENABLED_CLOUDS_KEY_PREFIX = 'enabled_clouds_'
 _ALLOWED_CLOUDS_KEY_PREFIX = 'allowed_clouds_'
+_EMPTY_STORAGE_CHECK_KEY_PREFIX = 'empty_storage_check_'
 
 DEFAULT_CLUSTER_EVENT_RETENTION_HOURS = 30 * 24.0
 # Matches the event retentions above so the launch timeline and the events it
@@ -3472,6 +3473,53 @@ def set_allowed_clouds(allowed_clouds: List[str], workspace: str) -> None:
 
 def _get_allowed_clouds_key(workspace: str) -> str:
     return _ALLOWED_CLOUDS_KEY_PREFIX + workspace
+
+
+def _get_empty_storage_check_key(workspace: str) -> str:
+    return _scope_config_key_to_user(_EMPTY_STORAGE_CHECK_KEY_PREFIX +
+                                     workspace)
+
+
+@metrics_lib.time_me
+def get_empty_storage_check(workspace: str) -> Optional[Tuple[str, float]]:
+    """Returns the config fingerprint and time of the last empty storage check.
+
+    Returns None if no empty result was recorded for `workspace`.
+    """
+    engine = _db_manager.get_engine()
+    with orm.Session(engine) as session:
+        row = session.query(config_table).filter_by(
+            key=_get_empty_storage_check_key(workspace)).first()
+    if not row:
+        return None
+    record = json.loads(row.value)
+    return record['config_fingerprint'], record['checked_at']
+
+
+@metrics_lib.time_me
+def set_empty_storage_check(workspace: str, config_fingerprint: str,
+                            checked_at: float) -> None:
+    """Records that a storage check found no enabled cloud."""
+    value = json.dumps({
+        'config_fingerprint': config_fingerprint,
+        'checked_at': checked_at
+    })
+    engine = _db_manager.get_engine()
+    with orm.Session(engine) as session:
+        if engine.dialect.name == db_utils.SQLAlchemyDialect.SQLITE.value:
+            insert_func = sqlite.insert
+        elif (engine.dialect.name == db_utils.SQLAlchemyDialect.POSTGRESQL.value
+             ):
+            insert_func = postgresql.insert
+        else:
+            raise ValueError('Unsupported database dialect')
+        insert_stmnt = insert_func(config_table).values(
+            key=_get_empty_storage_check_key(workspace), value=value)
+        do_update_stmt = insert_stmnt.on_conflict_do_update(
+            index_elements=[config_table.c.key],
+            set_={config_table.c.value: value})
+        session.execute(do_update_stmt)
+        session.commit()
 
 
 @metrics_lib.time_me

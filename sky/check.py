@@ -5,6 +5,7 @@ import json
 import os
 import re
 import threading
+import time
 import traceback
 from types import ModuleType
 from typing import (Any, Callable, Dict, Iterable, List, Optional, Set, Tuple,
@@ -40,6 +41,11 @@ STORAGE_ONLY_CLOUDS = (cloudflare.NAME, coreweave.NAME, vastdata.NAME,
 logger = sky_logging.init_logger(__name__)
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+# How long a storage check that found no enabled cloud is reused, for an
+# unchanged config. It bounds how long credentials added without running
+# `sky check` can go unnoticed, as they are not part of the config.
+_EMPTY_STORAGE_CHECK_TTL_SECONDS = 600
 
 
 def _is_storage_only(cloud_name: str) -> bool:
@@ -671,6 +677,23 @@ def _reader_rechecked(
     return {}
 
 
+def _has_current_empty_storage_check(workspace: str,
+                                     config_fingerprint: str) -> bool:
+    """Whether a recent storage check, on this config, found no enabled cloud.
+
+    An empty enabled-clouds row otherwise looks the same as one never checked,
+    so every launch of a user with no storage cloud would rerun the check,
+    which runs the cloud CLIs (seconds, with the AWS CLI installed).
+    """
+    record = global_user_state.get_empty_storage_check(workspace)
+    if record is None:
+        return False
+    checked_fingerprint, checked_at = record
+    age = time.time() - checked_at
+    return (checked_fingerprint == config_fingerprint and
+            0 <= age < _EMPTY_STORAGE_CHECK_TTL_SECONDS)
+
+
 def get_cached_enabled_clouds_or_refresh(
         capability: sky_cloud.CloudCapability,
         raise_if_no_cloud_access: bool = False) -> List[sky_clouds.Cloud]:
@@ -702,20 +725,29 @@ def get_cached_enabled_clouds_or_refresh(
         readable, writable = _caller_access_sets()
         may_store = active_workspace in writable
         if may_store:
-            try:
-                check_capability(capability,
-                                 quiet=True,
-                                 workspace=active_workspace)
-                if allowed_clouds_changed:
-                    global_user_state.set_allowed_clouds(
-                        skypilot_config_allowed_clouds, active_workspace)
-            except SystemExit:
-                # If no cloud is enabled, check() will raise SystemExit.
-                # Here we catch it and raise the exception later only if
-                # raise_if_no_cloud_access is set to True.
-                pass
-            cached_enabled_clouds = global_user_state.get_cached_enabled_clouds(
-                capability, active_workspace)
+            is_storage = capability == sky_cloud.CloudCapability.STORAGE
+            fingerprint = current_config_fingerprint() if is_storage else ''
+            if (allowed_clouds_changed or not is_storage or
+                    not _has_current_empty_storage_check(
+                        active_workspace, fingerprint)):
+                try:
+                    check_capability(capability,
+                                     quiet=True,
+                                     workspace=active_workspace)
+                    if allowed_clouds_changed:
+                        global_user_state.set_allowed_clouds(
+                            skypilot_config_allowed_clouds, active_workspace)
+                except SystemExit:
+                    # If no cloud is enabled, check() will raise SystemExit.
+                    # Here we catch it and raise the exception later only if
+                    # raise_if_no_cloud_access is set to True.
+                    pass
+                cached_enabled_clouds = (
+                    global_user_state.get_cached_enabled_clouds(
+                        capability, active_workspace))
+                if is_storage and not cached_enabled_clouds:
+                    global_user_state.set_empty_storage_check(
+                        active_workspace, fingerprint, time.time())
         else:
             if active_workspace not in readable:
                 with ux_utils.print_exception_no_traceback():
