@@ -493,9 +493,15 @@ RAY_HEAD_WAIT_INITIALIZED_COMMAND = (
 # Restart skylet when the version does not match to keep the skylet up-to-date.
 # We need to activate the python environment to make sure autostop in skylet
 # can find the cloud SDK/CLI in PATH.
-MAYBE_SKYLET_RESTART_CMD = (f'{constants.ACTIVATE_SKY_REMOTE_PYTHON_ENV}; '
-                            f'{constants.SKY_PYTHON_CMD} -m '
-                            'sky.skylet.attempt_skylet;')
+# Runs attempt_skylet.py by path, as `python -m` would first run sky/__init__.py,
+# which takes seconds. find_spec doesn't import a top-level package. A cluster
+# with an older wheel runs its older attempt_skylet.py the same way.
+MAYBE_SKYLET_RESTART_CMD = (
+    f'{constants.ACTIVATE_SKY_REMOTE_PYTHON_ENV}; '
+    f'{constants.SKY_PYTHON_CMD} -c "'
+    'import importlib.util as u, os, runpy; '
+    'runpy.run_path(os.path.join(os.path.dirname(u.find_spec(\'sky\').origin), '
+    '\'skylet\', \'attempt_skylet.py\'), run_name=\'__main__\')";')
 
 
 def _set_usage_run_id_cmd() -> str:

@@ -1,5 +1,11 @@
-"""Restarts skylet if version does not match"""
+"""Restarts skylet if version does not match.
 
+Run by path, not with `python -m`, and doesn't import `sky`: any `sky.*` import
+runs sky/__init__.py, which takes seconds and holds up every launch for the few
+milliseconds of work here. See instance_setup.MAYBE_SKYLET_RESTART_CMD.
+"""
+
+import importlib.util
 import os
 import shlex
 import signal
@@ -10,15 +16,45 @@ from typing import List, Optional, Tuple
 
 import psutil
 
-from sky.skylet import constants
-from sky.skylet import runtime_utils
-from sky.utils import common_utils
 
-VERSION_FILE = runtime_utils.get_runtime_dir_path(constants.SKYLET_VERSION_FILE)
-SKYLET_LOG_FILE = runtime_utils.get_runtime_dir_path(constants.SKYLET_LOG_FILE)
-PID_FILE = runtime_utils.get_runtime_dir_path(constants.SKYLET_PID_FILE)
-PORT_FILE = runtime_utils.get_runtime_dir_path(constants.SKYLET_PORT_FILE)
-START_FILE = runtime_utils.get_runtime_dir_path(constants.SKYLET_START_FILE)
+def _load_launch_constants():
+    """Loads launch_constants.py by path, so that `sky` isn't imported."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        'launch_constants.py')
+    spec = importlib.util.spec_from_file_location('sky_launch_constants', path)
+    assert spec is not None and spec.loader is not None, path
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+constants = _load_launch_constants()
+
+
+def _get_runtime_dir_path(path_suffix: str) -> str:
+    """Same as runtime_utils.get_runtime_dir_path, which imports `sky`."""
+    runtime_dir = os.path.expanduser(
+        os.environ.get(constants.SKY_RUNTIME_DIR_ENV_VAR_KEY, '~'))
+    return os.path.join(runtime_dir, path_suffix)
+
+
+def _find_free_port(start_port: int) -> int:
+    """Same as common_utils.find_free_port, which imports `sky`."""
+    for port in range(start_port, 65535):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(('', port))
+                return port
+            except OSError:
+                pass
+    raise OSError('No free ports available.')
+
+
+VERSION_FILE = _get_runtime_dir_path(constants.SKYLET_VERSION_FILE)
+SKYLET_LOG_FILE = _get_runtime_dir_path(constants.SKYLET_LOG_FILE)
+PID_FILE = _get_runtime_dir_path(constants.SKYLET_PID_FILE)
+PORT_FILE = _get_runtime_dir_path(constants.SKYLET_PORT_FILE)
+START_FILE = _get_runtime_dir_path(constants.SKYLET_START_FILE)
 
 # Duplicated from sky/provision/slurm/utils.py to avoid importing that module.
 _SLURM_MARKER_FILE = '.sky_slurm_cluster'
@@ -51,8 +87,7 @@ def _is_inside_slurm_cluster() -> bool:
     The generic Slurm check keeps the HOME fallback for older allocations.
     """
     return os.path.exists(
-        runtime_utils.get_runtime_dir_path(
-            os.path.join('.sky', _SLURM_MARKER_FILE)))
+        _get_runtime_dir_path(os.path.join('.sky', _SLURM_MARKER_FILE)))
 
 
 def _start_skylet_via_keeper(port: int) -> None:
@@ -231,7 +266,7 @@ def restart_skylet():
                 f'skylet port {port}, assigned to this pod, is already in use '
                 'on its node.')
     else:
-        port = common_utils.find_free_port(constants.SKYLET_GRPC_PORT)
+        port = _find_free_port(constants.SKYLET_GRPC_PORT)
     if on_slurm:
         _start_skylet_via_keeper(port)
     else:
