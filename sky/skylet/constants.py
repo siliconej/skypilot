@@ -496,9 +496,14 @@ SKYPILOT_WHEEL_INSTALLATION_COMMANDS = (
     'if [ "{cloud}" = "azure" ]; then '
     f'{SKY_UV_PIP_CMD} install --prerelease=allow "{dependencies.AZURE_CLI}";'
     'fi;'
-    # Install skypilot from wheel
-    f'{SKY_UV_PIP_CMD} install "$(echo ~/.sky/wheels/{{sky_wheel_hash}}/'
-    f'skypilot-{_sky_version}*.whl)[{{cloud}}, remote]" && '
+    # Install skypilot from wheel. Try without the network first: an image that
+    # pre-installs the dependencies doesn't need it, and a request that hangs on
+    # PyPI otherwise holds up the launch for 10 s or more. Falls back to the
+    # network if what's installed and cached can't satisfy the wheel.
+    f'_sky_wheel="$(echo ~/.sky/wheels/{{sky_wheel_hash}}/'
+    f'skypilot-{_sky_version}*.whl)[{{cloud}}, remote]"; '
+    f'{{ {SKY_UV_PIP_CMD} install --offline "$_sky_wheel" || '
+    f'{SKY_UV_PIP_CMD} install "$_sky_wheel"; }} && '
     'echo "{sky_wheel_hash}" > ~/.sky/wheels/current_sky_wheel_hash || '
     'exit 1; }; ')
 

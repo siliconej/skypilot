@@ -1564,8 +1564,13 @@ available_node_types:
                 # the PyPI install removed above. --dry-run resolves without
                 # changing the environment, so it is safe next to a starting
                 # Ray. Best-effort: a failure only leaves the cache cold.
+                # An image with a populated uv cache needs no warm-up: the wheel
+                # installs offline. Skipping it also avoids waiting here on PyPI,
+                # where a request can hang for 10 s or more.
+                if [ -z "$(ls -A ~/.cache/uv/archive-v0 2>/dev/null)" ]; then
                 VIRTUAL_ENV=${SKY_RUNTIME_DIR:-$HOME}/skypilot-runtime UV_SYSTEM_PYTHON=false {{sky_unset_pythonpath_and_set_cwd}} ~/.local/bin/uv pip install --dry-run 'skypilot[kubernetes,remote]' \
                   || echo "WARNING: could not warm the uv cache; continuing."
+                fi
 {% endif %}
                 # setup_commands waits for this marker before it installs the
                 # wheel, so no two installs touch the environment at once.
