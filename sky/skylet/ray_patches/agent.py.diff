@@ -1,0 +1,20 @@
+--- a/agent.py
++++ b/agent.py
+@@ -1,3 +1,5 @@
++# Adapted from https://github.com/ray-project/ray/blob/ray-2.56.1/python/ray/dashboard/agent.py
++# With SKYPILOT_RAY_NO_DASHBOARD=1, loads no modules.
+ import argparse
+ import asyncio
+ import json
+@@ -210,7 +212,10 @@
+         if self.server:
+             await self.server.start()
+ 
+-        modules = self._load_modules()
++        # SkyPilot: with no dashboard, load no modules, so the agent writes its
++        # ports, which the raylet waits for, as soon as it starts.
++        modules = ([] if os.environ.get('SKYPILOT_RAY_NO_DASHBOARD') == '1' else
++                   self._load_modules())
+ 
+         launch_http_server = True
+         if self.http_server:

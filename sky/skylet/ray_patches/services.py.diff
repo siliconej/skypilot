@@ -1,0 +1,28 @@
+--- a/services.py
++++ b/services.py
+@@ -1,3 +1,5 @@
++# Adapted from https://github.com/ray-project/ray/blob/ray-2.56.1/python/ray/_private/services.py
++# With SKYPILOT_RAY_NO_DASHBOARD=1, starts no dashboard and a minimal dashboard agent.
+ import base64
+ import collections
+ import errno
+@@ -1286,6 +1288,9 @@
+             - Dashboard URL if dashboard enabled and started.
+             - ProcessInfo for the process that was started.
+     """
++    if os.environ.get('SKYPILOT_RAY_NO_DASHBOARD') == '1':
++        # SkyPilot: no dashboard, so ray start doesn't wait for one.
++        return None, None
+     try:
+         # Make sure port is available.
+         if port is None:
+@@ -1906,7 +1911,8 @@
+         )
+         dashboard_agent_command.append(f"--logging-format={logging_format}")
+ 
+-    if ray._private.utils.get_dashboard_dependency_error() is not None:
++    if (ray._private.utils.get_dashboard_dependency_error() is not None or
++            os.environ.get('SKYPILOT_RAY_NO_DASHBOARD') == '1'):
+         # If dependencies are not installed, it is the minimally packaged
+         # ray. We should restrict the features within dashboard agent
+         # that requires additional dependencies to be downloaded.

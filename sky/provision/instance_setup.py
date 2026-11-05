@@ -772,6 +772,9 @@ def ray_head_start_command(custom_resource: Optional[str],
     cmd = (
         _host_network_probe_cmd('head') + RAY_STOP_IF_RUNNING +
         'RAY_SCHEDULER_EVENTS=0 RAY_DEDUP_LOGS=0 '
+        # No Ray dashboard: SkyPilot doesn't use it, and it delays every node's
+        # raylet. Read by the services.py and agent.py Ray patches.
+        'SKYPILOT_RAY_NO_DASHBOARD=1 '
         # worker_maximum_startup_concurrency controls the maximum number of
         # workers that can be started concurrently. However, it also controls
         # this warning message:
@@ -812,6 +815,9 @@ def ray_worker_start_command(custom_resource: Optional[str],
 
     cmd = (
         'RAY_SCHEDULER_EVENTS=0 RAY_DEDUP_LOGS=0 '
+        # No Ray dashboard: SkyPilot doesn't use it, and it delays every node's
+        # raylet. Read by the services.py and agent.py Ray patches.
+        'SKYPILOT_RAY_NO_DASHBOARD=1 '
         f'{constants.SKY_RAY_CMD} start --disable-usage-stats {ray_options} || '
         'exit 1;' + RAY_PRLIMIT)
     if no_restart:

@@ -1,0 +1,12 @@
+0a1,2
+> # Adapted from https://github.com/ray-project/ray/blob/ray-2.56.1/python/ray/_private/services.py
+> # With SKYPILOT_RAY_NO_DASHBOARD=1, starts no dashboard and a minimal dashboard agent.
+1288a1291,1293
+>     if os.environ.get('SKYPILOT_RAY_NO_DASHBOARD') == '1':
+>         # SkyPilot: no dashboard, so ray start doesn't wait for one.
+>         return None, None
+1909c1914,1915
+<     if ray._private.utils.get_dashboard_dependency_error() is not None:
+---
+>     if (ray._private.utils.get_dashboard_dependency_error() is not None or
+>             os.environ.get('SKYPILOT_RAY_NO_DASHBOARD') == '1'):
