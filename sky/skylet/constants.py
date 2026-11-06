@@ -151,7 +151,7 @@ DEACTIVATE_SKY_REMOTE_PYTHON_ENV = (
     'unset VIRTUAL_ENV && unset VIRTUAL_ENV_PROMPT')
 
 # Prefix for SkyPilot environment variables
-SKYPILOT_ENV_VAR_PREFIX = launch_constants.SKYPILOT_ENV_VAR_PREFIX
+SKYPILOT_ENV_VAR_PREFIX: str = launch_constants.SKYPILOT_ENV_VAR_PREFIX
 SKYPILOT_SERVER_ENV_VAR_PREFIX = 'SKYPILOT_SERVER_'
 
 # The name for the environment variable that stores the unique ID of the
