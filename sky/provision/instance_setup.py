@@ -724,6 +724,14 @@ def _ray_gpu_options(custom_resource: str) -> str:
     return f' --num-gpus={acc_count}'
 
 
+# Ray waits raylet_client_connect_timeout_milliseconds (1000 by default) before
+# retrying a failed connect to a local Ray socket. Each raylet's first connect
+# to its own plasma store can lose a race with the store's thread, which cost
+# 1 s on about a third of raylets. Retry every 0.2 s instead, with 5x the
+# attempts so Ray still gives up after about 10 s, as with the defaults.
+_RAY_CONNECT_RETRY_ENV = ('RAY_raylet_client_connect_timeout_milliseconds=200 '
+                          'RAY_raylet_client_num_connect_attempts=50 ')
+
 # Ray port flags shared by the head and worker start commands. The
 # ${VAR:-default} forms take the probed value when the hostNetwork probe
 # ran and the original constant otherwise; the ${VAR:+--flag=...} forms
@@ -774,7 +782,7 @@ def ray_head_start_command(custom_resource: Optional[str],
         'RAY_SCHEDULER_EVENTS=0 RAY_DEDUP_LOGS=0 '
         # No Ray dashboard: SkyPilot doesn't use it, and it delays every node's
         # raylet. Read by the services.py and agent.py Ray patches.
-        'SKYPILOT_RAY_NO_DASHBOARD=1 '
+        'SKYPILOT_RAY_NO_DASHBOARD=1 ' + _RAY_CONNECT_RETRY_ENV +
         # worker_maximum_startup_concurrency controls the maximum number of
         # workers that can be started concurrently. However, it also controls
         # this warning message:
@@ -817,7 +825,7 @@ def ray_worker_start_command(custom_resource: Optional[str],
         'RAY_SCHEDULER_EVENTS=0 RAY_DEDUP_LOGS=0 '
         # No Ray dashboard: SkyPilot doesn't use it, and it delays every node's
         # raylet. Read by the services.py and agent.py Ray patches.
-        'SKYPILOT_RAY_NO_DASHBOARD=1 '
+        'SKYPILOT_RAY_NO_DASHBOARD=1 ' + _RAY_CONNECT_RETRY_ENV +
         f'{constants.SKY_RAY_CMD} start --disable-usage-stats {ray_options} || '
         'exit 1;' + RAY_PRLIMIT)
     if no_restart:
