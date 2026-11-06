@@ -88,6 +88,15 @@ _LIVE_LINK_MAX_ATTEMPTS = 30  # give up live updates after ~30 attempts
 # database connections and finish together, so the loops never drift apart.
 _STATUS_CHECK_GAP_JITTER = 0.2
 
+# The monitor loop's first gaps after a launch (or recovery) returns with its
+# job not yet ended. A launch returns once the job is past INIT, so a short job
+# ends soon after, and a first check a random part of a whole gap later would
+# leave it waiting up to JOB_STATUS_CHECK_GAP_SECONDS to be seen as done. These
+# add up to about one gap, after which the usual jittered gaps take over. They
+# don't need jitter: launches finish at their own times, so loops behind them
+# don't start together.
+_STATUS_CHECK_GAPS_AFTER_LAUNCH_SECONDS = (1.0, 1.0, 2.0, 2.0, 4.0, 4.0)
+
 
 def _status_check_gap_seconds(first_check: bool) -> float:
     """Returns how long the monitor loop waits before a job status check.
@@ -1510,6 +1519,10 @@ class JobController:
         live_link_attempts = 0
         live_link_poll_counter = 0
         first_status_check = True
+        # Gaps still to use before the next status checks, after a launch that
+        # returned with the job not yet ended. See
+        # _STATUS_CHECK_GAPS_AFTER_LAUNCH_SECONDS.
+        gaps_after_launch: List[float] = []
         # The last runtime observation persisted for this task, which the
         # runtime receives as `previous`. It is read from the database before
         # the first dispatch and again after each recovery, whose relaunch
@@ -1571,9 +1584,16 @@ class JobController:
                                 f'launch returned ({seen_at_launch}); '
                                 'checking it now.')
                 else:
-                    await asyncio.sleep(
-                        _status_check_gap_seconds(
-                            first_check=first_status_check))
+                    if seen_at_launch is not None:
+                        # A launch just returned, with the job not ended yet.
+                        gaps_after_launch = list(
+                            _STATUS_CHECK_GAPS_AFTER_LAUNCH_SECONDS)
+                    if gaps_after_launch:
+                        await asyncio.sleep(gaps_after_launch.pop(0))
+                    else:
+                        await asyncio.sleep(
+                            _status_check_gap_seconds(
+                                first_check=first_status_check))
                 first_status_check = False
 
                 # Check the network connection to avoid false alarm for job

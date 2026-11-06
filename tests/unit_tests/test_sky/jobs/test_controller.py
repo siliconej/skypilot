@@ -3189,13 +3189,86 @@ class TestFirstCheckAfterLaunch:
     async def test_checks_at_once_when_launch_saw_the_job_end(self, status):
         assert await self._sleeps_before_first_check(status) == []
 
-    @pytest.mark.parametrize('status', [None, job_lib.JobStatus.RUNNING])
     @pytest.mark.asyncio
-    async def test_waits_a_jittered_gap_otherwise(self, status):
+    async def test_waits_a_jittered_gap_without_a_launch(self):
+        """E.g. a loop resumed after a controller restart: loops that start
+        together are spread out."""
         with patch.object(controller_module, 'random', random.Random(0)):
-            sleeps = await self._sleeps_before_first_check(status)
+            sleeps = await self._sleeps_before_first_check(None)
         assert len(sleeps) == 1
         assert 0 <= sleeps[0] <= managed_job_utils.JOB_STATUS_CHECK_GAP_SECONDS
+
+    @pytest.mark.parametrize('status', [
+        job_lib.JobStatus.PENDING, job_lib.JobStatus.SETTING_UP,
+        job_lib.JobStatus.RUNNING
+    ])
+    @pytest.mark.asyncio
+    async def test_checks_soon_after_a_launch_saw_the_job_running(self, status):
+        """A short job is then seen ending soon after it does, not up to a
+        whole gap later."""
+        sleeps = await self._sleeps_before_first_check(status)
+        assert sleeps == [
+            controller_module._STATUS_CHECK_GAPS_AFTER_LAUNCH_SECONDS[0]
+        ]
+
+    @pytest.mark.asyncio
+    async def test_gaps_after_a_launch_lead_into_the_usual_gaps(self):
+        """The short gaps add up to about one gap; then the jittered ones."""
+        gaps_after_launch = list(
+            controller_module._STATUS_CHECK_GAPS_AFTER_LAUNCH_SECONDS)
+        num_checks = len(gaps_after_launch) + 3
+        checks = 0
+
+        async def running(*args, **kwargs):
+            nonlocal checks
+            checks += 1
+            if checks > num_checks:
+                raise self._StopLoop()
+            return job_lib.JobStatus.RUNNING, None, None
+
+        task = MagicMock()
+        task.num_nodes = 1
+        instance = MagicMock()
+        instance._job_id = 1
+        instance._pool = None
+        instance._update_live_log_links = AsyncMock(return_value=True)
+        # The launch saw the job running, once; later pops find nothing.
+        executor = MagicMock(
+            **{
+                'pop_job_status_seen_at_launch.side_effect':
+                    [job_lib.JobStatus.RUNNING] + [None] * (num_checks + 1),
+                'pop_ended_job_seen_at_launch.return_value': None
+            })
+        sleep = AsyncMock(return_value=None)
+        with patch.object(controller_module, 'random', random.Random(0)), \
+             patch.object(managed_job_utils, 'get_job_status_and_ended_job',
+                          new=AsyncMock(side_effect=running)), \
+             patch.object(controller_module.backend_utils,
+                          'async_check_network_connection',
+                          new=AsyncMock(return_value=None)), \
+             patch.object(controller_module, '_network_check_is_fresh',
+                          return_value=False), \
+             patch.object(controller_module.managed_job_runtime,
+                          'is_registered', return_value=False), \
+             patch.object(controller_module.asyncio, 'sleep', new=sleep):
+            with pytest.raises(self._StopLoop):
+                await JobController._monitor_one_task_impl(
+                    instance,
+                    task_id=0,
+                    task=task,
+                    cluster_name='cluster',
+                    executor=executor,
+                    status_logger=managed_job_utils.JobStatusLogger(),
+                    callback_func=AsyncMock())
+        sleeps = [call.args[0] for call in sleep.call_args_list]
+        assert sleeps[:len(gaps_after_launch)] == gaps_after_launch
+        gap = managed_job_utils.JOB_STATUS_CHECK_GAP_SECONDS
+        jitter = controller_module._STATUS_CHECK_GAP_JITTER
+        later = sleeps[len(gaps_after_launch):]
+        assert len(later) == num_checks + 1 - len(gaps_after_launch)
+        assert all(
+            gap * (1 - jitter) <= s <= gap * (1 + jitter) for s in later), later
+        assert sum(gaps_after_launch) <= gap
 
     async def _end_time_and_calls(self, seen_at_launch, ended_job_at_launch,
                                   check_result):

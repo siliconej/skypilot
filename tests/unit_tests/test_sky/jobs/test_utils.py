@@ -2950,6 +2950,108 @@ class TestJobStatusAndSubmittedAt:
             3) == (job_lib.JobStatus.RUNNING, None, None)
         backend.run_on_head.assert_not_called()
 
+    def _skylet_client(self, monkeypatch, ended_at=1250.5, log_dirs=None):
+        """A fake SkyletClient; returns it so tests can check its calls.
+
+        ended_at or log_dirs set to an exception makes that call raise it.
+        """
+        client = MagicMock()
+        if isinstance(ended_at, Exception):
+            client.get_job_ended_timestamp.side_effect = ended_at
+        else:
+            response = MagicMock(timestamp_double=ended_at)
+            response.HasField.side_effect = (
+                lambda field: field == 'timestamp_double' and ended_at is
+                not None)
+            client.get_job_ended_timestamp.return_value = response
+        if isinstance(log_dirs, Exception):
+            client.get_log_dirs_for_jobs.side_effect = log_dirs
+        else:
+            client.get_log_dirs_for_jobs.return_value = MagicMock(
+                job_log_dirs=log_dirs or {})
+        monkeypatch.setattr(jobs_utils.cloud_vm_ray_backend, 'SkyletClient',
+                            lambda channel: client)
+        return client
+
+    def test_grpc_finished_job_returns_its_end_time_and_log_dir(
+            self, monkeypatch):
+        """As the head command does, so the controller needs no lookups."""
+        client = self._skylet_client(monkeypatch,
+                                     log_dirs={3: '~/sky_logs/sky-ts'})
+        backend = self._backend()
+        backend.get_job_status.return_value = {3: job_lib.JobStatus.SUCCEEDED}
+        assert jobs_utils._job_status_and_times_on_head(
+            backend, self._handle(grpc=True),
+            3) == (job_lib.JobStatus.SUCCEEDED, None,
+                   jobs_utils.EndedJob(1250.5, {'3': '~/sky_logs/sky-ts'}))
+        backend.run_on_head.assert_not_called()
+
+    def test_grpc_latest_job_is_looked_up_by_its_id(self, monkeypatch):
+        """job_id None is the latest job; the follow-up calls name it, so a
+        job submitted in between doesn't get mixed in."""
+        client = self._skylet_client(monkeypatch)
+        backend = self._backend()
+        backend.get_job_status.return_value = {7: job_lib.JobStatus.FAILED}
+        status, _, ended_job = jobs_utils._job_status_and_times_on_head(
+            backend, self._handle(grpc=True), None)
+        assert (status, ended_job) == (job_lib.JobStatus.FAILED,
+                                       jobs_utils.EndedJob(1250.5, None))
+        request = client.get_job_ended_timestamp.call_args.args[0]
+        assert request.job_id == 7
+        request = client.get_log_dirs_for_jobs.call_args.args[0]
+        assert list(request.job_ids) == [7]
+
+    def test_grpc_running_job_makes_no_more_calls(self, monkeypatch):
+        client = self._skylet_client(monkeypatch)
+        backend = self._backend()
+        backend.get_job_status.return_value = {3: job_lib.JobStatus.RUNNING}
+        assert jobs_utils._job_status_and_times_on_head(
+            backend, self._handle(grpc=True),
+            3) == (job_lib.JobStatus.RUNNING, None, None)
+        client.get_job_ended_timestamp.assert_not_called()
+        client.get_log_dirs_for_jobs.assert_not_called()
+
+    def test_grpc_rounded_end_time_from_an_older_skylet_is_ignored(
+            self, monkeypatch):
+        """An older skylet only sets the float rounded to 128 s."""
+        self._skylet_client(monkeypatch,
+                            ended_at=None,
+                            log_dirs={3: '~/sky_logs/sky-ts'})
+        backend = self._backend()
+        backend.get_job_status.return_value = {3: job_lib.JobStatus.SUCCEEDED}
+        assert jobs_utils._job_status_and_times_on_head(
+            backend, self._handle(grpc=True),
+            3) == (job_lib.JobStatus.SUCCEEDED, None,
+                   jobs_utils.EndedJob(None, {'3': '~/sky_logs/sky-ts'}))
+
+    @pytest.mark.parametrize('error', [
+        exceptions.SkyletInternalError('job 3 not found or not ended'),
+        exceptions.SkyletMethodNotImplementedError('old skylet'),
+        exceptions.SkyletUnavailableError('tunnel closed'),
+    ])
+    def test_grpc_failed_lookups_leave_them_to_the_caller(
+            self, monkeypatch, error):
+        """Best effort: the status still comes back, and the caller then
+        looks up the end time and log directory itself."""
+        self._skylet_client(monkeypatch, ended_at=error, log_dirs=error)
+        backend = self._backend()
+        backend.get_job_status.return_value = {3: job_lib.JobStatus.SUCCEEDED}
+        assert jobs_utils._job_status_and_times_on_head(
+            backend, self._handle(grpc=True),
+            3) == (job_lib.JobStatus.SUCCEEDED, None, None)
+
+    def test_grpc_one_failed_lookup_keeps_the_other(self, monkeypatch):
+        self._skylet_client(
+            monkeypatch,
+            ended_at=1250.5,
+            log_dirs=exceptions.SkyletUnavailableError('tunnel closed'))
+        backend = self._backend()
+        backend.get_job_status.return_value = {3: job_lib.JobStatus.SUCCEEDED}
+        assert jobs_utils._job_status_and_times_on_head(
+            backend, self._handle(grpc=True),
+            3) == (job_lib.JobStatus.SUCCEEDED, None,
+                   jobs_utils.EndedJob(1250.5, None))
+
     @pytest.mark.parametrize('returncode,stdout,reason', [
         (255, '', 'Returncode: 255'),
         (0, '', 'produced no output'),

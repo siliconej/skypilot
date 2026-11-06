@@ -946,7 +946,12 @@ def _job_status_and_times_on_head(
         statuses = backend.get_job_status(handle,
                                           job_ids=job_ids,
                                           stream_logs=False)
-        return list(statuses.values())[0], None, None
+        # Keyed by the job's ID on the cluster, also when job_id is None.
+        status_job_id, status = list(statuses.items())[0]
+        if (status is None or not status.is_terminal() or
+                status_job_id is None):
+            return status, None, None
+        return status, None, _ended_job_over_grpc(handle, status_job_id)
     code = job_lib.JobLibCodeGen.get_job_status_and_timestamps(job_id)
     returncode, stdout, stderr = backend.run_on_head(handle,
                                                      code,
@@ -982,6 +987,45 @@ def _job_status_and_times_on_head(
     if ended_at is None and log_dirs is None:
         return status, submitted_at, None
     return status, submitted_at, EndedJob(ended_at, log_dirs)
+
+
+def _ended_job_over_grpc(handle: 'backends.CloudVmRayResourceHandle',
+                         job_id: int) -> Optional[EndedJob]:
+    """Fetches an ended job's end time and log directory from the skylet.
+
+    What the head command returns with the status, so a job seen ending over
+    gRPC needs no separate lookups either. Best effort, as there: what this
+    doesn't get stays None, and callers look it up as before.
+    """
+    # Any failure here, including opening the tunnel or a job the skylet
+    # hasn't seen end, only means the caller makes its own lookups, which
+    # handle their errors fully.
+    ended_at: Optional[float] = None
+    log_dirs: Optional[Dict[str, str]] = None
+    try:
+        client = cloud_vm_ray_backend.SkyletClient(handle.get_grpc_channel())
+        end_response = backend_utils.invoke_skylet_with_retries(
+            lambda: client.get_job_ended_timestamp(
+                jobsv1_pb2.GetJobEndedTimestampRequest(job_id=job_id)))
+        # An older skylet only sets `timestamp`, rounded to the nearest 128 s.
+        # get_job_timestamp reads that case through the head command.
+        if end_response.HasField('timestamp_double'):
+            ended_at = end_response.timestamp_double
+    except Exception as e:  # pylint: disable=broad-except
+        logger.debug(f'Failed to get the end time of job {job_id}: {e}')
+    try:
+        client = cloud_vm_ray_backend.SkyletClient(handle.get_grpc_channel())
+        dirs_response = backend_utils.invoke_skylet_with_retries(
+            lambda: client.get_log_dirs_for_jobs(
+                jobsv1_pb2.GetLogDirsForJobsRequest(job_ids=[job_id])))
+        # By job ID as a string, as sync_down_logs takes them.
+        log_dirs = {str(k): v for k, v in dirs_response.job_log_dirs.items()
+                   } or None
+    except Exception as e:  # pylint: disable=broad-except
+        logger.debug(f'Failed to get the log directory of job {job_id}: {e}')
+    if ended_at is None and log_dirs is None:
+        return None
+    return EndedJob(ended_at, log_dirs)
 
 
 async def _fetch_job_status_on_head(
